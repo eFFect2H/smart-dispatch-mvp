@@ -1,0 +1,132 @@
+# Smart Dispatch MVP
+
+Минимальный backend для кейса «Умная диспетчеризация выездных бригад».
+
+## Что уже реализовано
+
+- REST API для чтения и создания бригад и транспортных заявок.
+- PostgreSQL и миграции схемы/демо-данных через Flyway.
+- Матрица автомобильного времени между базами бригад и заявками через OSRM Table API.
+- Оптимизация назначений и порядка посещения через Google OR-Tools (VRPTW): временные окна, смены бригад, длительность обслуживания и суммарная вместимость.
+- Сохранение рассчитанных назначений и планового времени прибытия в PostgreSQL.
+- Примерные данные по Берлину применяются автоматически при первом запуске пустой БД.
+
+## Требования
+
+- JDK 21.
+- Docker Desktop с Docker Compose (или доступный локальный PostgreSQL 16).
+- Подключение к интернету для публичного демо-сервера OSRM `router.project-osrm.org`.
+- Maven Wrapper из проекта Initializr или Maven 3.6.3+.
+
+Публичный OSRM используется только для разработки/демонстрации и не гарантирует SLA. Для нормальной эксплуатации настройте собственный или управляемый сервер маршрутизации через `OSRM_BASE_URL`.
+
+## Запуск
+
+1. Распакуйте архив и откройте папку `smart-dispatch-mvp` в IntelliJ IDEA как Maven-проект.
+2. Запустите PostgreSQL:
+
+   ```bash
+   docker compose up -d db
+   ```
+
+3. Убедитесь, что используется JDK 21 (`File → Project Structure → Project SDK`).
+4. Запустите `SmartDispatchApplication.java` или из терминала выполните:
+
+   ```bash
+   mvn spring-boot:run
+   ```
+
+   В IntelliJ IDEA можно запустить `spring-boot:run` из окна Maven (`Plugins → spring-boot → spring-boot:run`). Если Maven установлен, команда в терминале: `mvn spring-boot:run`.
+
+5. При первом старте Flyway создаст таблицы и добавит 2 тестовые бригады и 5 заявок.
+
+Настройки БД по умолчанию совпадают с `docker-compose.yml`: `smart_dispatch`, пользователь `dispatch`, пароль `dispatch`. Их можно переопределить переменными окружения `DB_URL`, `DB_USERNAME`, `DB_PASSWORD`.
+
+## API
+
+### Получить бригады
+
+```http
+GET http://localhost:8080/api/teams
+```
+
+### Создать бригаду
+
+```http
+POST http://localhost:8080/api/teams
+Content-Type: application/json
+
+{
+  "name": "Южная бригада",
+  "capacity": 3,
+  "startLatitude": 52.49,
+  "startLongitude": 13.40,
+  "shiftStartMinute": 480,
+  "shiftEndMinute": 1080,
+  "active": true
+}
+```
+
+### Получить заявки
+
+```http
+GET http://localhost:8080/api/requests
+```
+
+### Создать заявку
+
+Временные значения передаются в минутах от полуночи: `480` = 08:00, `615` = 10:15. Временное окно ограничивает время начала обслуживания.
+
+```http
+POST http://localhost:8080/api/requests
+Content-Type: application/json
+
+{
+  "title": "Срочный вызов",
+  "address": "Potsdamer Platz, Berlin",
+  "latitude": 52.5096,
+  "longitude": 13.3759,
+  "windowStartMinute": 600,
+  "windowEndMinute": 720,
+  "serviceDurationMinutes": 30,
+  "demand": 1
+}
+```
+
+### Рассчитать диспетчеризацию
+
+```http
+POST http://localhost:8080/api/dispatch/optimize
+```
+
+Тело запроса не требуется. В ответе будут маршруты по каждой активной бригаде, порядок заявок, оценка времени прибытия, время в пути и суммарное время движения. Результат также сохраняется: заявки переходят в `PLANNED`, получают `assignedTeamId` и `plannedArrivalMinute`.
+
+Для повторного расчёта берутся заявки со статусами `NEW` и `PLANNED`; завершённые (`COMPLETED`) не участвуют. На данном этапе отдельного API для завершения заявки ещё нет.
+
+### Повторить запросы из PowerShell
+
+```powershell
+Invoke-RestMethod http://localhost:8080/api/teams
+Invoke-RestMethod http://localhost:8080/api/requests
+Invoke-RestMethod -Method Post http://localhost:8080/api/dispatch/optimize
+```
+
+## Архитектура
+
+- `controller/` — REST endpoints.
+- `dto/` — модели HTTP-запросов и ответов.
+- `entity/` — JPA-сущности.
+- `repository/` — доступ к PostgreSQL через Spring Data JPA.
+- `service/` — бизнес-логика и транзакции.
+- `routing/OsrmMatrixClient` — матрица времени в пути из OSRM.
+- `optimization/DispatchOptimizerService` — построение модели и решение VRPTW в OR-Tools.
+- `resources/db/migration/` — SQL-миграции Flyway.
+
+## Ограничения MVP
+
+- Все заявки должны быть распределены; если задача не имеет допустимого решения с заданными окнами/вместимостью/сменами, API возвращает HTTP 422.
+- `capacity` и `demand` — абстрактные единицы вместимости, пока не разделённые на людей, оборудование или тип транспорта.
+- Нет учёта навыков бригад, перерывов, пробок в реальном времени, приоритетов, стоимости сверхурочных, ручного закрепления и отмены заявок.
+- Время в ответе — минуты от полуночи, а не форматированная локальная дата/время.
+- Матрица ограничена 100 точками в этом MVP.
+- Интерфейс-карта, аутентификация и управление завершёнными заявками — следующие итерации, не часть этого начального backend MVP.

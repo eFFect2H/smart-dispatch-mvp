@@ -1,0 +1,39 @@
+@baseUrl = http://localhost:8080
+
+### Get seeded teams
+GET {{baseUrl}}/api/teams
+
+### Get seeded requests
+GET {{baseUrl}}/api/requests
+
+### Add a team
+POST {{baseUrl}}/api/teams
+Content-Type: application/json
+
+{
+  "name": "Южная бригада",
+  "capacity": 3,
+  "startLatitude": 52.49,
+  "startLongitude": 13.40,
+  "shiftStartMinute": 480,
+  "shiftEndMinute": 1080,
+  "active": true
+}
+
+### Add a transport request
+POST {{baseUrl}}/api/requests
+Content-Type: application/json
+
+{
+  "title": "Срочный вызов",
+  "address": "Potsdamer Platz, Berlin",
+  "latitude": 52.5096,
+  "longitude": 13.3759,
+  "windowStartMinute": 600,
+  "windowEndMinute": 720,
+  "serviceDurationMinutes": 30,
+  "demand": 1
+}
+
+### Optimize all NEW and PLANNED requests
+POST {{baseUrl}}/api/dispatch/optimize

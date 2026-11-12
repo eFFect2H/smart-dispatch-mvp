@@ -1,0 +1,20 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: smart-dispatch-db
+    environment:
+      POSTGRES_DB: smart_dispatch
+      POSTGRES_USER: dispatch
+      POSTGRES_PASSWORD: dispatch
+    ports:
+      - "5433:5432"
+    volumes:
+      - smart_dispatch_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dispatch -d smart_dispatch"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  smart_dispatch_pgdata:
