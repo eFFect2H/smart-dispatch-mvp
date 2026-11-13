@@ -95,8 +95,12 @@ class DispatchEventReplayServiceTest {
                 .toString().contains("ST-001"));
         assertEquals(1, baseDay.path("orders").size(),
                 "Projection must not mutate the original day payload");
+        assertEquals("2026-10-26T09:00:00+05:00",
+                baseDay.path("orders").get(0).path("slot").path("start").asText(),
+                "The original day snapshot must remain unchanged");
         assertEquals("2026-10-26T14:00:00+05:00",
-                baseDay.path("orders").get(0).path("slot").path("start").asText());
+                newOrder.path("order").path("slot").path("start").asText(),
+                "Replay must not mutate the NEW_ORDER event payload");
     }
 
     @Test
