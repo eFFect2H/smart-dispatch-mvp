@@ -12,6 +12,6 @@ import java.util.Optional;
 public interface DispatchDaySnapshotRepository
         extends JpaRepository<DispatchDaySnapshotEntity, LocalDate> {
     @Lock(LockModeType.PESSIMISTIC_WRITE)
-    @Query("select day from DispatchDaySnapshotEntity day where day.dayDate = :date")
+    @Query("select d from DispatchDaySnapshotEntity d where d.dayDate = :date")
     Optional<DispatchDaySnapshotEntity> findByDateForUpdate(@Param("date") LocalDate date);
 }
