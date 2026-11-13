@@ -14,7 +14,11 @@ import org.junit.jupiter.api.Test;
 
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
@@ -113,6 +117,52 @@ class DispatchPlanServiceTest {
 
     @Test
     void groupsThreePgpRelevantOrdersAndReportsPlanQuality() throws Exception {
+        PlanDtos.PlanResponse plan = planForPgpOrders(0, 20, 40);
+
+        assertEquals(1, plan.pgpGroups().size());
+        assertEquals(3, plan.pgpGroups().get(0).orderIds().size());
+        assertEquals("AN-0001", plan.pgpGroups().get(0).accessNodeId());
+        assertEquals(1, plan.alerts().size());
+        assertEquals("PGP_DETECTED", plan.alerts().get(0).type());
+        assertTrue(plan.routes().get(0).stops().isEmpty());
+        assertTrue(plan.unassigned().isEmpty());
+        assertEquals(3, plan.summary().ordersTotal());
+        assertEquals(0, plan.summary().visitsPlanned());
+        assertEquals(0, plan.summary().unassigned());
+        assertEquals(3, plan.summary().pgpOrders());
+    }
+
+    @Test
+    void treatsPgpSixtyMinuteBoundaryAsInclusiveAndRejectsSixtyOneMinutes() throws Exception {
+        PlanDtos.PlanResponse fiftyNineMinutes = planForPgpOrders(0, 30, 59);
+        PlanDtos.PlanResponse exactlySixtyMinutes = planForPgpOrders(0, 30, 60);
+        PlanDtos.PlanResponse sixtyOneMinutes = planForPgpOrders(0, 30, 61);
+
+        assertEquals(1, fiftyNineMinutes.pgpGroups().size());
+        assertEquals(1, exactlySixtyMinutes.pgpGroups().size());
+        assertTrue(sixtyOneMinutes.pgpGroups().isEmpty());
+        assertEquals(0, sixtyOneMinutes.summary().pgpOrders());
+    }
+
+    @Test
+    void splitsTransitiveOverlappingPgpWindowsIntoDisjointGroups() throws Exception {
+        PlanDtos.PlanResponse plan = planForPgpOrders(0, 20, 40, 60, 80, 100);
+
+        assertEquals(2, plan.pgpGroups().size());
+        assertEquals(3, plan.pgpGroups().get(0).orderIds().size());
+        assertEquals(3, plan.pgpGroups().get(1).orderIds().size());
+
+        Set<String> groupedIds = new HashSet<>();
+        for (PlanDtos.PgpGroupDto group : plan.pgpGroups()) {
+            assertTrue(groupedIds.addAll(group.orderIds()));
+            assertEquals(3, group.orderIds().size());
+        }
+        assertEquals(6, groupedIds.size());
+        assertEquals(6, plan.summary().pgpOrders());
+        assertEquals(2, plan.alerts().size());
+    }
+
+    private PlanDtos.PlanResponse planForPgpOrders(int... minuteOffsets) throws Exception {
         ObjectMapper mapper = new ObjectMapper().registerModule(new JavaTimeModule())
                 .disable(DeserializationFeature.ADJUST_DATES_TO_CONTEXT_TIME_ZONE);
         String referenceJson = """
@@ -126,8 +176,8 @@ class DispatchPlanServiceTest {
                       "profiles":["INSTALL"],"technologies":["PON"],"height_permit":false,
                       "shift":{"start":"08:00","end":"18:00","break_duration_min":30,
                                "break_window":{"from":"12:00","to":"14:00"}},
-                      "equipment_start":{"ONT":3,"ROUTER":3,"STB":3},
-                      "equipment_capacity":{"ONT":3,"ROUTER":3,"STB":3}
+                      "equipment_start":{"ONT":10,"ROUTER":10,"STB":10},
+                      "equipment_capacity":{"ONT":10,"ROUTER":10,"STB":10}
                     }
                   ],
                   "work_types":[
@@ -135,60 +185,68 @@ class DispatchPlanServiceTest {
                   ]
                 }
                 """;
+
+        OffsetDateTime registrationStart = OffsetDateTime.parse("2026-10-26T08:00:00+05:00");
         String orderTemplate = """
                 {
-                  "order_id":"ORD-20261026-%s","work_type_code":"REPAIR","technology":"PON",
+                  "order_id":"ORD-20261026-%04d","work_type_code":"REPAIR","technology":"PON",
                   "building_id":"B-%05d","requires_height":false,"access_node_id":"AN-0001",
-                  "registered_at":"2026-10-26T08:%02d:00+05:00",
+                  "registered_at":"%s",
                   "slot":{"start":"2026-10-26T10:00:00+05:00","end":"2026-10-26T12:00:00+05:00"},
                   "latest_start":"2026-10-26T10:30:00+05:00","deadline":"2026-10-26T11:00:00+05:00",
                   "required_equipment":{"ONT":0,"ROUTER":0,"STB":0}
                 }
                 """;
-        String orders = String.join(",",
-                orderTemplate.formatted("0001", 1, 0),
-                orderTemplate.formatted("0002", 2, 20),
-                orderTemplate.formatted("0003", 3, 40));
+        List<String> orders = new ArrayList<>();
+        List<String> pointIds = new ArrayList<>();
+        pointIds.add("SC-01");
+        for (int i = 0; i < minuteOffsets.length; i++) {
+            String registeredAt = registrationStart.plusMinutes(minuteOffsets[i]).toString();
+            orders.add(orderTemplate.formatted(i + 1, i + 1, registeredAt));
+            pointIds.add("B-%05d".formatted(i + 1));
+        }
         String dayJson = """
                 {"absent_staff_ids":[],"orders":[%s]}
-                """.formatted(orders);
+                """.formatted(String.join(",", orders));
+        String pointsJson = pointIds.stream()
+                .map(id -> "\"" + id + "\"")
+                .collect(java.util.stream.Collectors.joining(","));
+        String matrix = matrixJson(pointIds.size());
         String matrixJson = """
-                {
-                  "points":["SC-01","B-00001","B-00002","B-00003"],
-                  "durations_sec":[[0,300,300,300],[300,0,300,300],[300,300,0,300],[300,300,300,0]],
-                  "distances_m":[[0,100,100,100],[100,0,100,100],[100,100,0,100],[100,100,100,0]]
-                }
-                """;
+                {"points":[%s],"durations_sec":%s,"distances_m":%s}
+                """.formatted(pointsJson, matrix, matrix);
 
         DispatchDaySnapshotRepository dayRepository = mock(DispatchDaySnapshotRepository.class);
         ReferenceSnapshotRepository referenceRepository = mock(ReferenceSnapshotRepository.class);
         TravelMatrixSnapshotRepository matrixRepository = mock(TravelMatrixSnapshotRepository.class);
         DispatchDaySnapshotEntity day = new DispatchDaySnapshotEntity(
-                DATE, NOW, mapper.readTree(dayJson), 3);
+                DATE, NOW, mapper.readTree(dayJson), minuteOffsets.length);
         ReferenceSnapshotEntity reference = new ReferenceSnapshotEntity(
-                mapper.readTree(referenceJson), 1, 1, 1, 3, 1);
-        TravelMatrixSnapshotEntity matrix = new TravelMatrixSnapshotEntity(
-                "PGP-MATRIX", mapper.readTree(matrixJson), 4);
+                mapper.readTree(referenceJson), 1, 1, 1, minuteOffsets.length, 1);
+        TravelMatrixSnapshotEntity travelMatrix = new TravelMatrixSnapshotEntity(
+                "PGP-MATRIX", mapper.readTree(matrixJson), pointIds.size());
 
         when(dayRepository.findById(DATE)).thenReturn(Optional.of(day));
         when(referenceRepository.findById((short) 1)).thenReturn(Optional.of(reference));
-        when(matrixRepository.findById((short) 1)).thenReturn(Optional.of(matrix));
+        when(matrixRepository.findById((short) 1)).thenReturn(Optional.of(travelMatrix));
 
         DispatchPlanService service = new DispatchPlanService(
                 dayRepository, referenceRepository, matrixRepository, mapper);
-        PlanDtos.PlanResponse plan = service.generate(DATE, new PlanDtos.PlanRequest(60));
+        return service.generate(DATE, new PlanDtos.PlanRequest(60));
+    }
 
-        assertEquals(1, plan.pgpGroups().size());
-        assertEquals(3, plan.pgpGroups().get(0).orderIds().size());
-        assertEquals("AN-0001", plan.pgpGroups().get(0).accessNodeId());
-        assertEquals(1, plan.alerts().size());
-        assertEquals("PGP_DETECTED", plan.alerts().get(0).type());
-        assertTrue(plan.routes().get(0).stops().isEmpty());
-        assertTrue(plan.unassigned().isEmpty());
-        assertEquals(3, plan.summary().ordersTotal());
-        assertEquals(0, plan.summary().visitsPlanned());
-        assertEquals(0, plan.summary().unassigned());
-        assertEquals(3, plan.summary().pgpOrders());
+    private String matrixJson(int size) {
+        StringBuilder matrix = new StringBuilder("[");
+        for (int row = 0; row < size; row++) {
+            if (row > 0) matrix.append(",");
+            matrix.append("[");
+            for (int column = 0; column < size; column++) {
+                if (column > 0) matrix.append(",");
+                matrix.append(row == column ? 0 : 300);
+            }
+            matrix.append("]");
+        }
+        return matrix.append("]").toString();
     }
 
     private Fixture fixture(String startingEquipment, String capacity, boolean homeCenterOpen,

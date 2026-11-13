@@ -413,6 +413,68 @@ public class DispatchPlanService {
         return routes;
     }
 
+    /**
+     * Selects disjoint PGP groups while keeping every group's registration-time span
+     * within the inclusive 60-minute window. The dynamic program maximizes the number
+     * of orders assigned to PGP groups, then prefers fewer groups and a deterministic
+     * earlier/larger first group when multiple partitions cover the same number of orders.
+     */
+    private List<GroupWindow> selectPgpWindows(List<JsonNode> candidates) {
+        int size = candidates.size();
+        PgpPartition[] bestFrom = new PgpPartition[size + 1];
+        bestFrom[size] = new PgpPartition(0, List.of());
+
+        for (int start = size - 1; start >= 0; start--) {
+            PgpPartition best = bestFrom[start + 1]; // Leaving this order outside a PGP group is allowed.
+            OffsetDateTime startTime = parseTime(candidates.get(start).path("registered_at"));
+
+            for (int end = start + 2; end < size; end++) {
+                OffsetDateTime endTime = parseTime(candidates.get(end).path("registered_at"));
+                if (Duration.between(startTime, endTime).compareTo(PGP_WINDOW) > 0) {
+                    break;
+                }
+
+                PgpPartition suffix = bestFrom[end + 1];
+                List<GroupWindow> windows = new ArrayList<>(1 + suffix.windows.size());
+                OffsetDateTime detectedAt =
+                        parseTime(candidates.get(start + 2).path("registered_at"));
+                windows.add(new GroupWindow(start, end, detectedAt));
+                windows.addAll(suffix.windows);
+
+                PgpPartition candidate = new PgpPartition(
+                        end - start + 1 + suffix.groupedOrderCount,
+                        List.copyOf(windows));
+                if (isBetterPgpPartition(candidate, best)) {
+                    best = candidate;
+                }
+            }
+            bestFrom[start] = best;
+        }
+
+        return bestFrom[0].windows;
+    }
+
+    private boolean isBetterPgpPartition(PgpPartition candidate, PgpPartition current) {
+        if (candidate.groupedOrderCount != current.groupedOrderCount) {
+            return candidate.groupedOrderCount > current.groupedOrderCount;
+        }
+        if (candidate.windows.size() != current.windows.size()) {
+            return candidate.windows.size() < current.windows.size();
+        }
+
+        for (int i = 0; i < candidate.windows.size(); i++) {
+            GroupWindow left = candidate.windows.get(i);
+            GroupWindow right = current.windows.get(i);
+            if (left.startIndex != right.startIndex) {
+                return left.startIndex < right.startIndex;
+            }
+            if (left.endIndex != right.endIndex) {
+                return left.endIndex > right.endIndex;
+            }
+        }
+        return false;
+    }
+
     private PgpDetection detectPgpGroups(LocalDate date, List<JsonNode> orders,
                                          Map<String, JsonNode> workTypes) {
         Map<String, List<JsonNode>> byAccessNode = new TreeMap<>();
@@ -433,29 +495,10 @@ public class DispatchPlanService {
 
         for (Map.Entry<String, List<JsonNode>> entry : byAccessNode.entrySet()) {
             List<JsonNode> candidates = entry.getValue();
-            candidates.sort(Comparator.comparing(order -> parseTime(order.path("registered_at"))));
-            List<GroupWindow> windows = new ArrayList<>();
-
-            for (int start = 0; start < candidates.size(); start++) {
-                int end = start;
-                OffsetDateTime startTime = parseTime(candidates.get(start).path("registered_at"));
-                while (end < candidates.size()
-                        && Duration.between(startTime,
-                        parseTime(candidates.get(end).path("registered_at"))).compareTo(PGP_WINDOW) <= 0) {
-                    end++;
-                }
-                if (end - start < 3) {
-                    continue;
-                }
-
-                if (!windows.isEmpty() && start <= windows.get(windows.size() - 1).endIndex) {
-                    GroupWindow previous = windows.get(windows.size() - 1);
-                    previous.endIndex = Math.max(previous.endIndex, end - 1);
-                } else {
-                    OffsetDateTime detectedAt = parseTime(candidates.get(start + 2).path("registered_at"));
-                    windows.add(new GroupWindow(start, end - 1, detectedAt));
-                }
-            }
+            candidates.sort(Comparator
+                    .comparing((JsonNode order) -> parseTime(order.path("registered_at")))
+                    .thenComparing(order -> order.path("order_id").asText()));
+            List<GroupWindow> windows = selectPgpWindows(candidates);
 
             for (GroupWindow window : windows) {
                 List<String> ids = new ArrayList<>();
@@ -1024,9 +1067,11 @@ public class DispatchPlanService {
     private record PgpDetection(List<PgpGroupDto> groups, Set<String> orderIds,
                                 List<AlertDto> alerts) { }
 
+    private record PgpPartition(int groupedOrderCount, List<GroupWindow> windows) { }
+
     private static final class GroupWindow {
         private final int startIndex;
-        private int endIndex;
+        private final int endIndex;
         private final OffsetDateTime detectedAt;
 
         private GroupWindow(int startIndex, int endIndex, OffsetDateTime detectedAt) {
