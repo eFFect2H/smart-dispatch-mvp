@@ -182,9 +182,6 @@ public class DispatchPlanService {
                     addUnassigned(unassigned, alerts, orderId, "SLOT_UNREACHABLE",
                             "No qualified available staff member can reach the order within its allowed start window",
                             "RESCHEDULE", day.getModelNow());
-                    if (bestLateRisk != null && orderId.equals(bestLateRisk.orderId())) {
-                        addLateRiskAlert(alerts, bestLateRisk, day.getModelNow());
-                    }
                 } else if (shiftBlocked) {
                     addUnassigned(unassigned, alerts, orderId, "NO_SHIFT_TIME",
                             "The visit, mandatory break and return to the service center do not fit inside a qualified staff shift",
@@ -192,6 +189,9 @@ public class DispatchPlanService {
                 } else {
                     addUnassigned(unassigned, alerts, orderId, "OTHER",
                             "No feasible route insertion was found", "ESCALATE", day.getModelNow());
+                }
+                if (bestLateRisk != null && orderId.equals(bestLateRisk.orderId())) {
+                    addLateRiskAlert(alerts, bestLateRisk, day.getModelNow());
                 }
                 continue;
             }
