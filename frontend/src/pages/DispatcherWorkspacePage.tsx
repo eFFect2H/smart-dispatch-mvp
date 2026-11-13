@@ -163,7 +163,8 @@ function locationIndex(reference: ReferenceData | null): Map<string, { lat: numb
 function MapAutoFit({ points }: { points: [number, number][] }) {
     const map = useMap();
     useEffect(() => {
-        if (points.length) map.fitBounds(points, { padding: [30, 30], maxZoom: 14 });
+        if (points.length === 1) map.setView(points[0], 13);
+        else if (points.length > 1) map.fitBounds(points, { padding: [30, 30], maxZoom: 14 });
     }, [map, points]);
     return null;
 }
@@ -256,6 +257,10 @@ export default function DispatcherWorkspacePage() {
         mapRoutes.flatMap(({ points }) => points.map((point) => [point.lat, point.lon] as [number, number])), [mapRoutes]);
     const activeAlerts = (plan?.alerts ?? []).filter((alert: PlanAlert) =>
         alert.status === "ACTIVE" && alert.type === "LATE_RISK");
+    const staffOptions = reference?.staff ?? (plan?.routes ?? []).map((route) => ({
+        staff_id: route.staff_id,
+        display_name: route.staff_id,
+    }));
 
     function fileHandler(setter: (file: File | null) => void) {
         return (event: ChangeEvent<HTMLInputElement>) => setter(event.target.files?.[0] ?? null);
@@ -428,7 +433,7 @@ export default function DispatcherWorkspacePage() {
                     <div className="v1-plan-meta"><span className="v1-live-dot" /> План v{plan.plan_version} · на {formatDateTime(plan.as_of)} · расчёт {plan.computation_ms} мс</div>
                     <label className="v1-filter"><Filter size={14} /><select value={staffFilter} onChange={(event) => setStaffFilter(event.target.value)}>
                         <option value="ALL">Все сотрудники</option>
-                        {(reference?.staff ?? plan.routes.map((route) => ({ staff_id: route.staff_id, service_center_id: route.service_center_id } as StaffMember))).map((staff) =>
+                        {staffOptions.map((staff) =>
                             <option key={staff.staff_id} value={staff.staff_id}>{staff.display_name || staff.staff_id}</option>)}
                     </select></label>
                 </div>
