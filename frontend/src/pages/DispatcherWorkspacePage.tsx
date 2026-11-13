@@ -11,6 +11,10 @@ import {
     appendEvent, generatePlan, getEventHistory, getPlan, uploadDay,
     uploadReference, uploadTravelMatrix,
 } from "../api/v1Dispatch";
+import PlanComparisonPanel from "../components/dispatch/PlanComparisonPanel";
+import SelectedOrderDetails from "../components/dispatch/SelectedOrderDetails";
+import { comparePlanVersions } from "../utils/planInsights";
+import type { PlanComparison } from "../utils/planInsights";
 import type {
     AccessNode, DayInput, EventHistory, EventRequest, EventType, Order,
     PlanAlert, PlanResponse, PlanRoute, PlanStop, ReferenceData, ServiceCenter,
@@ -228,6 +232,7 @@ export default function DispatcherWorkspacePage() {
     const [reference, setReference] = useState<ReferenceData | null>(null);
     const [allOrders, setAllOrders] = useState<Order[]>([]);
     const [plan, setPlan] = useState<PlanResponse | null>(null);
+    const [planComparison, setPlanComparison] = useState<PlanComparison | null>(null);
     const [eventHistory, setEventHistory] = useState<EventHistory | null>(null);
     const [absentStaffInput, setAbsentStaffInput] = useState("");
     const [eventType, setEventType] = useState<EventType>("VISIT_DELAYED");
@@ -311,10 +316,13 @@ export default function DispatcherWorkspacePage() {
                 date, now: modelNow, orders: selectedOrders,
                 absent_staff_ids: absentStaffInput.split(",").map((value) => value.trim()).filter(Boolean),
             };
+            const previousPlan = plan?.date === date ? plan : null;
             await uploadDay(date, dayInput);
             await generatePlan(date);
             const [latestPlan, history] = await Promise.all([getPlan(date), getEventHistory(date)]);
             setAllOrders(orders); setPlan(latestPlan); setEventHistory(history); setEventNow(modelNow);
+            setPlanComparison(comparePlanVersions(previousPlan, latestPlan, "Перестроение исходного дня"));
+            setSelectedOrderId(null);
             setNotice("План v" + latestPlan.plan_version + " построен. В день загружено " + selectedOrders.length + " нарядов.");
             setActivePanel("unassigned");
         } catch (cause) { setError(getErrorMessage(cause)); }
@@ -324,7 +332,10 @@ export default function DispatcherWorkspacePage() {
     async function handleRefresh() {
         setRefreshing(true); setError(null);
         try {
+            const previousPlan = plan?.date === date ? plan : null;
             const [latestPlan, history] = await Promise.all([getPlan(date), getEventHistory(date)]);
+            const comparison = comparePlanVersions(previousPlan, latestPlan, "Обновление из API");
+            if (comparison) setPlanComparison(comparison);
             setPlan(latestPlan); setEventHistory(history);
             setNotice("Получен план v" + latestPlan.plan_version + " на " + date + ".");
         } catch (cause) { setError(getErrorMessage(cause)); }
@@ -364,6 +375,7 @@ export default function DispatcherWorkspacePage() {
             ...(eventType === "ORDER_TRANSFERRED" ? { target_staff_id: targetStaffId.trim() } : {}),
             payload,
         };
+        const previousPlan = plan;
         setSending(true); setError(null); setNotice(null);
         try {
             await appendEvent(date, event);
@@ -371,6 +383,14 @@ export default function DispatcherWorkspacePage() {
             await generatePlan(date);
             const [latestPlan, history] = await Promise.all([getPlan(date), getEventHistory(date)]);
             setPlan(latestPlan); setEventHistory(history); setModelNow(eventNow);
+            setPlanComparison(comparePlanVersions(previousPlan, latestPlan, EVENT_LABELS[eventType]));
+            if (eventType === "NEW_ORDER" && typeof payload.order === "object" && payload.order !== null &&
+                "order_id" in payload.order && typeof payload.order.order_id === "string") {
+                const newOrder = payload.order as Order;
+                setAllOrders(current => current.some(item => item.order_id === newOrder.order_id)
+                    ? current : [...current, newOrder]);
+                setSelectedOrderId(newOrder.order_id);
+            }
             setNotice("Событие принято. План пересчитан до версии v" + latestPlan.plan_version + ".");
         } catch (cause) { setError(getErrorMessage(cause)); }
         finally { setSending(false); }
@@ -388,6 +408,7 @@ export default function DispatcherWorkspacePage() {
                         <input type="date" value={date} onChange={(event) => {
                             const value = event.target.value; setDate(value);
                             setModelNow(value + modelNow.slice(10)); setEventNow(value + eventNow.slice(10));
+                            setPlan(null); setEventHistory(null); setPlanComparison(null); setSelectedOrderId(null);
                         }} /></label>
                     <button className="secondary-button" type="button" onClick={() => void handleRefresh()} disabled={refreshing}>
                         <RefreshCw size={15} className={refreshing ? "v1-spin" : ""} /> Обновить
@@ -441,6 +462,11 @@ export default function DispatcherWorkspacePage() {
                     </select></label>
                 </div>
 
+                {planComparison && <PlanComparisonPanel
+                    comparison={planComparison}
+                    onClose={() => setPlanComparison(null)}
+                />}
+
                 <div className="v1-main-grid">
                     <section className="v1-card v1-map-card">
                         <div className="v1-card-heading"><div><h2><MapPinned size={17} /> Карта маршрутов</h2><p>Последовательность остановок сотрудников</p></div><span className="v1-card-count">{mapRoutes.length} маршрутов</span></div>
@@ -480,6 +506,14 @@ export default function DispatcherWorkspacePage() {
                         <div className="v1-gantt-legend"><span><i className="visit" /> Визит</span><span><i className="break" /> Перерыв</span><span><i className="depot" /> СЦ / RESTOCK</span></div>
                     </section>
                 </div>
+
+                {selectedOrderId && <SelectedOrderDetails
+                    orderId={selectedOrderId}
+                    order={allOrders.find(order => order.order_id === selectedOrderId) ?? null}
+                    plan={plan}
+                    reference={reference}
+                    onClose={() => setSelectedOrderId(null)}
+                />}
 
                 <section className="v1-card v1-lists-card">
                     <div className="v1-card-heading"><div><h2><Layers3 size={17} /> Контроль дня</h2><p>Состояния, требующие внимания диспетчера</p></div></div>
