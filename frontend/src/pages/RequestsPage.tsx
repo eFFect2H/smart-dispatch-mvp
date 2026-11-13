@@ -117,7 +117,22 @@ export default function RequestsPage() {
     }
 
     useEffect(() => {
-        void loadRequests();
+        let isActive = true;
+
+        getRequests()
+            .then((data) => {
+                if (isActive) setRequests(data);
+            })
+            .catch((err: unknown) => {
+                if (isActive) setError(getErrorMessage(err));
+            })
+            .finally(() => {
+                if (isActive) setLoading(false);
+            });
+
+        return () => {
+            isActive = false;
+        };
     }, []);
 
     const filteredRequests = requests.filter((request) => {
