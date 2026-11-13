@@ -405,6 +405,41 @@ class DispatchPlanServiceTest {
                 "The base snapshot must remain unchanged after delay replay");
     }
 
+
+    @Test
+    void emitsLateRiskWhenTheBestForecastMissesTheOrderStartWindow() throws Exception {
+        Fixture fixture = fixture("""
+                {"ONT":1,"ROUTER":0,"STB":0}
+                """, """
+                {"ONT":1,"ROUTER":0,"STB":0}
+                """, true, false);
+
+        com.fasterxml.jackson.databind.node.ObjectNode order =
+                (com.fasterxml.jackson.databind.node.ObjectNode) fixture.day.getPayload()
+                        .path("orders").get(0);
+        ((com.fasterxml.jackson.databind.node.ObjectNode) order.path("slot"))
+                .put("start", "2026-10-26T08:00:00+05:00");
+        order.put("latest_start", "2026-10-26T08:05:00+05:00");
+        order.put("deadline", "2026-10-26T08:40:00+05:00");
+
+        PlanDtos.PlanResponse plan =
+                fixture.service.generate(DATE, new PlanDtos.PlanRequest(60));
+
+        assertEquals(1, plan.unassigned().size());
+        assertEquals("SLOT_UNREACHABLE", plan.unassigned().get(0).reasonCode());
+        PlanDtos.AlertDto lateRisk = plan.alerts().stream()
+                .filter(alert -> "LATE_RISK".equals(alert.type()))
+                .findFirst().orElseThrow();
+
+        assertEquals("ACTIVE", lateRisk.status());
+        assertEquals("ORD-20261026-0001", lateRisk.orderId());
+        assertEquals(5, lateRisk.latenessMin());
+        assertEquals("ST-001", lateRisk.suggestedStaffId());
+        assertEquals(OffsetDateTime.parse("2026-10-26T08:10:00+05:00"), lateRisk.forecastStart());
+        assertEquals(OffsetDateTime.parse("2026-10-26T08:10:00+05:00"), lateRisk.proposedSlot().start());
+        assertEquals(OffsetDateTime.parse("2026-10-26T08:40:00+05:00"), lateRisk.proposedSlot().end());
+    }
+
     @Test
     void staffUnavailableEventBlocksNewAssignments() throws Exception {
         Fixture fixture = fixture("""
@@ -644,7 +679,8 @@ class DispatchPlanServiceTest {
         DispatchEventReplayService eventReplayService =
                 new DispatchEventReplayService(eventRepository, mapper);
         DispatchPlanService service = new DispatchPlanService(
-                dayRepository, referenceRepository, matrixRepository, eventReplayService, mapper);
+                dayRepository, referenceRepository, matrixRepository, eventReplayService,
+                new DispatchAlertService(mapper), mapper);
         return service.generate(DATE, new PlanDtos.PlanRequest(60));
     }
 
@@ -746,7 +782,8 @@ class DispatchPlanServiceTest {
         DispatchEventReplayService eventReplayService =
                 new DispatchEventReplayService(eventRepository, mapper);
         DispatchPlanService service = new DispatchPlanService(
-                dayRepository, referenceRepository, matrixRepository, eventReplayService, mapper);
+                dayRepository, referenceRepository, matrixRepository, eventReplayService,
+                new DispatchAlertService(mapper), mapper);
         return new Fixture(service, dayRepository, eventRepository, day);
     }
 
