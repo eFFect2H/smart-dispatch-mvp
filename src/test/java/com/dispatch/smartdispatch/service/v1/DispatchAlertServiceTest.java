@@ -2,12 +2,17 @@ package com.dispatch.smartdispatch.service.v1;
 
 import com.dispatch.smartdispatch.dto.v1.PlanDtos.AlertDto;
 import com.dispatch.smartdispatch.dto.v1.V1Dtos.TimeWindowDto;
+import com.fasterxml.jackson.core.JsonGenerator;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.JsonSerializer;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializerProvider;
+import com.fasterxml.jackson.databind.module.SimpleModule;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.io.IOException;
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.util.List;
@@ -38,7 +43,12 @@ class DispatchAlertServiceTest {
         AlertDto regenerated = alert("ALR-20261026-0001", MODEL_NOW, "ACTIVE", null,
                 "UNASSIGNED", "Order is still unassigned");
 
-        List<AlertDto> result = service.reconcile(planWith(previous), List.of(regenerated),
+        JsonNode previousPlan = planWith(previous);
+        assertEquals(CREATED_AT.toString(),
+                previousPlan.path("alerts").get(0).path("created_at").asText(),
+                "The persisted alert snapshot must retain its original UTC offset");
+
+        List<AlertDto> result = service.reconcile(previousPlan, List.of(regenerated),
                 DATE, MODEL_NOW);
 
         assertEquals(1, result.size());
@@ -98,7 +108,18 @@ class DispatchAlertServiceTest {
     }
 
     private JsonNode planWith(AlertDto... alerts) {
-        return mapper.valueToTree(Map.of("alerts", List.of(alerts)));
+        // Match DispatchPlanService's persisted-plan serializer: OffsetDateTime
+        // values are stored with their original offset, not normalized to UTC.
+        SimpleModule snapshotTimeModule = new SimpleModule("test-plan-snapshot-offset-date-time");
+        snapshotTimeModule.addSerializer(OffsetDateTime.class, new JsonSerializer<>() {
+            @Override
+            public void serialize(OffsetDateTime value, JsonGenerator generator,
+                                  SerializerProvider serializers) throws IOException {
+                generator.writeString(value.toString());
+            }
+        });
+        ObjectMapper snapshotMapper = mapper.copy().registerModule(snapshotTimeModule);
+        return snapshotMapper.valueToTree(Map.of("alerts", List.of(alerts)));
     }
 
     private AlertDto alert(String id, OffsetDateTime createdAt, String status,
