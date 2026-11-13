@@ -400,7 +400,7 @@ class DispatchPlanServiceTest {
                 .findFirst().orElseThrow();
 
         assertFalse(visit.start().isBefore(OffsetDateTime.parse("2026-10-26T09:30:00+05:00")));
-        assertEquals("2026-10-26T09:30:00+05:00",
+        assertEquals("2026-10-26T09:00:00+05:00",
                 fixture.day.getPayload().path("orders").get(0).path("slot").path("start").asText(),
                 "The base snapshot must remain unchanged after delay replay");
     }
