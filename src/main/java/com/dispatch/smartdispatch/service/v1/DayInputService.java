@@ -45,6 +45,8 @@ public class DayInputService {
                         "REFERENCE_NOT_LOADED", "Upload reference data before uploading a day"));
 
         validateOrders(pathDate, request, reference);
+        // Serialize replacement with event ingestion so events cannot attach to a stale day snapshot.
+        dayRepository.findByDateForUpdate(pathDate);
         eventRepository.deleteByDayDate(pathDate);
         JsonNode payload = objectMapper.valueToTree(request);
         dayRepository.save(new DispatchDaySnapshotEntity(
