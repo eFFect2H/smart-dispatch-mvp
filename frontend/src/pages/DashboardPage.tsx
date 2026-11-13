@@ -38,9 +38,6 @@ export default function DashboardPage() {
     const [error, setError] = useState<string | null>(null);
 
     async function loadData() {
-        setLoading(true);
-        setError(null);
-
         try {
             const [teamsData, requestsData] = await Promise.all([
                 getTeams(),
@@ -57,6 +54,12 @@ export default function DashboardPage() {
         } finally {
             setLoading(false);
         }
+    }
+
+    function refreshData() {
+        setLoading(true);
+        setError(null);
+        void loadData();
     }
 
     useEffect(() => {
@@ -92,7 +95,7 @@ export default function DashboardPage() {
                 <div className="dashboard-actions">
                     <button
                         className="secondary-button"
-                        onClick={() => void loadData()}
+                        onClick={refreshData}
                         disabled={loading}
                     >
                         <RefreshCw size={16} />
