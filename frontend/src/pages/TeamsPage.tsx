@@ -93,9 +93,6 @@ export default function TeamsPage() {
     const [form, setForm] = useState<TeamForm>(initialForm);
 
     async function loadTeams() {
-        setLoading(true);
-        setError(null);
-
         try {
             const data = await getTeams();
             setTeams(data);
@@ -106,8 +103,29 @@ export default function TeamsPage() {
         }
     }
 
+    async function refreshTeams() {
+        setLoading(true);
+        setError(null);
+        await loadTeams();
+    }
+
     useEffect(() => {
-        void loadTeams();
+        let isActive = true;
+
+        getTeams()
+            .then((data) => {
+                if (isActive) setTeams(data);
+            })
+            .catch((err: unknown) => {
+                if (isActive) setError(getErrorMessage(err));
+            })
+            .finally(() => {
+                if (isActive) setLoading(false);
+            });
+
+        return () => {
+            isActive = false;
+        };
     }, []);
 
     const filteredTeams = teams.filter((team) => {
@@ -224,7 +242,7 @@ export default function TeamsPage() {
                     <button
                         type="button"
                         className="secondary-button"
-                        onClick={() => void loadTeams()}
+                        onClick={() => void refreshTeams()}
                         disabled={loading}
                     >
                         <RefreshCw size={16} />

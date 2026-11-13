@@ -11,7 +11,7 @@ const links = [
     { to: "/", label: "Обзор", icon: LayoutDashboard },
     { to: "/requests", label: "Заявки", icon: ClipboardList },
     { to: "/teams", label: "Бригады", icon: Users },
-    { to: "/dispatch", label: "Диспетчеризация", icon: Route },
+    { to: "/dispatch", label: "Рабочее место", icon: Route },
 ];
 
 export default function Sidebar() {

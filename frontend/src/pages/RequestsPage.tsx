@@ -100,9 +100,6 @@ export default function RequestsPage() {
     const [form, setForm] = useState<RequestForm>(initialForm);
 
     async function loadRequests() {
-        setLoading(true);
-        setError(null);
-
         try {
             const data = await getRequests();
             setRequests(data);
@@ -113,8 +110,29 @@ export default function RequestsPage() {
         }
     }
 
+    async function refreshRequests() {
+        setLoading(true);
+        setError(null);
+        await loadRequests();
+    }
+
     useEffect(() => {
-        void loadRequests();
+        let isActive = true;
+
+        getRequests()
+            .then((data) => {
+                if (isActive) setRequests(data);
+            })
+            .catch((err: unknown) => {
+                if (isActive) setError(getErrorMessage(err));
+            })
+            .finally(() => {
+                if (isActive) setLoading(false);
+            });
+
+        return () => {
+            isActive = false;
+        };
     }, []);
 
     const filteredRequests = requests.filter((request) => {
@@ -200,7 +218,7 @@ export default function RequestsPage() {
             setShowForm(false);
             setSuccess("Заявка успешно создана.");
 
-            await loadRequests();
+            await refreshRequests();
         } catch (err) {
             setError(getErrorMessage(err));
         } finally {
@@ -221,7 +239,7 @@ export default function RequestsPage() {
                     <button
                         type="button"
                         className="secondary-button"
-                        onClick={() => void loadRequests()}
+                        onClick={() => void refreshRequests()}
                         disabled={loading}
                     >
                         <RefreshCw size={16} />

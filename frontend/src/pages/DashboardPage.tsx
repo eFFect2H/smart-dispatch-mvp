@@ -38,9 +38,6 @@ export default function DashboardPage() {
     const [error, setError] = useState<string | null>(null);
 
     async function loadData() {
-        setLoading(true);
-        setError(null);
-
         try {
             const [teamsData, requestsData] = await Promise.all([
                 getTeams(),
@@ -59,8 +56,36 @@ export default function DashboardPage() {
         }
     }
 
-    useEffect(() => {
+    function refreshData() {
+        setLoading(true);
+        setError(null);
         void loadData();
+    }
+
+    useEffect(() => {
+        let isActive = true;
+
+        Promise.all([getTeams(), getRequests()])
+            .then(([teamsData, requestsData]) => {
+                if (!isActive) return;
+                setTeams(teamsData);
+                setRequests(requestsData);
+            })
+            .catch((err: unknown) => {
+                console.error("Ошибка загрузки данных:", err);
+                if (isActive) {
+                    setError(
+                        "Не удалось загрузить данные. Проверь, запущен ли backend и доступен ли API."
+                    );
+                }
+            })
+            .finally(() => {
+                if (isActive) setLoading(false);
+            });
+
+        return () => {
+            isActive = false;
+        };
     }, []);
 
     const safeTeams = Array.isArray(teams) ? teams : [];
@@ -92,7 +117,7 @@ export default function DashboardPage() {
                 <div className="dashboard-actions">
                     <button
                         className="secondary-button"
-                        onClick={() => void loadData()}
+                        onClick={refreshData}
                         disabled={loading}
                     >
                         <RefreshCw size={16} />
