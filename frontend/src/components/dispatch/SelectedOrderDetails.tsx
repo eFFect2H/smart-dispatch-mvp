@@ -1,11 +1,17 @@
 import { AlertTriangle, CheckCircle2, Info, X } from "lucide-react";
 import type { Order, PlanResponse, ReferenceData } from "../../types/v1";
+import DispatchActionPanel from "./DispatchActionPanel";
 
 interface SelectedOrderDetailsProps {
     orderId: string;
     order: Order | null;
     plan: PlanResponse;
     reference: ReferenceData | null;
+    modelNow: string;
+    actionsDisabled: boolean;
+    onTransferOrder: (targetStaffId: string) => void;
+    onDelayOrder: (delayMin: number) => void;
+    onCancelOrder: () => void;
     onClose: () => void;
 }
 
@@ -54,6 +60,11 @@ export default function SelectedOrderDetails({
     order,
     plan,
     reference,
+    modelNow,
+    actionsDisabled,
+    onTransferOrder,
+    onDelayOrder,
+    onCancelOrder,
     onClose,
 }: SelectedOrderDetailsProps) {
     const assignedRoute = plan.routes.find(route =>
@@ -89,6 +100,25 @@ export default function SelectedOrderDetails({
         unassigned ? "Не распределён" :
         pgpGroup ? "В группе ПГП" :
         cancelled ? "Отменён" : "Состояние не определено";
+    const orderState = assignedRoute && visit ? "assigned" :
+        unassigned ? "unassigned" : pgpGroup ? "pgp" : null;
+    const modelNowMs = Date.parse(modelNow);
+    const isFrozen = Boolean(assignedRoute && stopIndex > 0 && Number.isFinite(modelNowMs) &&
+        assignedRoute.stops.slice(0, stopIndex).every(stop => Date.parse(stop.end) < modelNowMs));
+    const transferStaff = order && workType && reference
+        ? reference.staff.filter(member => {
+            if (member.staff_id === assignedRoute?.staff_id) return false;
+            const profileMatch = member.profiles.some(profile => workType.profiles.includes(profile));
+            const technologyMatch = member.technologies.includes(order.technology);
+            const heightMatch = !order.requires_height || member.height_permit;
+            const route = plan.routes.find(candidate => candidate.staff_id === member.staff_id);
+            const routeFinished = Boolean(route && route.stops.length > 0 &&
+                route.stops[route.stops.length - 1].type === "DEPOT_END" &&
+                route.stops.slice(0, -1).every(stop => Date.parse(stop.end) < modelNowMs));
+            return profileMatch && technologyMatch && heightMatch &&
+                route?.status !== "UNAVAILABLE" && !routeFinished;
+        })
+        : [];
 
     return (
         <section className="v1-card v1-order-details">
@@ -114,6 +144,20 @@ export default function SelectedOrderDetails({
                 <div className="v1-order-missing">
                     Данные наряда не найдены среди загруженных заказов. Состояние ниже взято из сохранённого плана.
                 </div>
+            )}
+
+            {order && orderState && (
+                <DispatchActionPanel
+                    key={orderId}
+                    state={orderState}
+                    currentStaffId={assignedRoute?.staff_id}
+                    targetStaff={transferStaff}
+                    isFrozen={isFrozen}
+                    disabled={actionsDisabled}
+                    onTransfer={onTransferOrder}
+                    onDelay={onDelayOrder}
+                    onCancel={onCancelOrder}
+                />
             )}
 
             {order && (
