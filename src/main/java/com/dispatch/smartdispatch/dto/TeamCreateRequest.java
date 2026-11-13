@@ -1,7 +1,9 @@
 package com.dispatch.smartdispatch.dto;
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import jakarta.validation.constraints.*;
 
+@JsonIgnoreProperties(ignoreUnknown = true)
 public record TeamCreateRequest(
         @NotBlank @Size(max = 150) String name,
         @NotNull @Min(1) @Max(1000) Integer capacity,

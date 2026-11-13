@@ -1,7 +1,9 @@
 package com.dispatch.smartdispatch.dto;
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import jakarta.validation.constraints.*;
 
+@JsonIgnoreProperties(ignoreUnknown = true)
 public record TransportRequestCreateRequest(
         @NotBlank @Size(max = 200) String title,
         @NotBlank @Size(max = 500) String address,
