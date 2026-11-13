@@ -1,5 +1,5 @@
 import { ArrowDownRight, ArrowUpRight, GitCompare, X } from "lucide-react";
-import type { PlanComparison, PlanMetricSnapshot } from "../../utils/planInsights";
+import type { PlanComparison } from "../../utils/planInsights";
 
 interface PlanComparisonPanelProps {
     comparison: PlanComparison;
