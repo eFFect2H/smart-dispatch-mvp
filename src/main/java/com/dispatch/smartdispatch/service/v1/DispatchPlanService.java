@@ -10,15 +10,18 @@ import com.dispatch.smartdispatch.exception.v1.V1ApiException;
 import com.dispatch.smartdispatch.repository.v1.DispatchDaySnapshotRepository;
 import com.dispatch.smartdispatch.repository.v1.ReferenceSnapshotRepository;
 import com.dispatch.smartdispatch.repository.v1.TravelMatrixSnapshotRepository;
+import com.fasterxml.jackson.core.JsonGenerator;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.JsonSerializer;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
-import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.fasterxml.jackson.databind.SerializerProvider;
+import com.fasterxml.jackson.databind.module.SimpleModule;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.io.IOException;
 import java.time.Duration;
 import java.time.LocalDate;
 import java.time.LocalTime;
@@ -192,87 +195,16 @@ public class DispatchPlanService {
         validateFrozenPrefixes(response, frozenRoutes);
 
         try {
-            JsonNode storedPlan = toStoredPlanSnapshot(response);
+            SimpleModule snapshotTimeModule = new SimpleModule("plan-snapshot-offset-date-time");
+            snapshotTimeModule.addSerializer(OffsetDateTime.class, new OffsetDateTimeSnapshotSerializer());
+            ObjectMapper snapshotMapper = objectMapper.copy().registerModule(snapshotTimeModule);
+            JsonNode storedPlan = snapshotMapper.valueToTree(response);
             day.updatePlan(response.planVersion(), storedPlan, day.getModelNow());
         } catch (IllegalArgumentException ex) {
             throw new IllegalStateException("Could not serialize generated plan", ex);
         }
         dayRepository.save(day);
         return response;
-    }
-
-    /**
-     * Creates the persisted JSON snapshot and restores the original textual offsets
-     * for every OffsetDateTime field in the plan DTO. Jackson may normalize these
-     * fields to the mapper's context timezone during valueToTree().
-     */
-    private JsonNode toStoredPlanSnapshot(PlanResponse response) {
-        ObjectNode root = objectMapper.valueToTree(response);
-        putOffsetDateTime(root, "as_of", response.asOf());
-
-        ArrayNode routeNodes = root.withArray("routes");
-        for (int routeIndex = 0; routeIndex < response.routes().size(); routeIndex++) {
-            RouteDto route = response.routes().get(routeIndex);
-            ObjectNode routeNode = (ObjectNode) routeNodes.get(routeIndex);
-            ArrayNode stopNodes = routeNode.withArray("stops");
-            for (int stopIndex = 0; stopIndex < route.stops().size(); stopIndex++) {
-                StopDto stop = route.stops().get(stopIndex);
-                ObjectNode stopNode = (ObjectNode) stopNodes.get(stopIndex);
-                putOffsetDateTime(stopNode, "arrival", stop.arrival());
-                putOffsetDateTime(stopNode, "start", stop.start());
-                putOffsetDateTime(stopNode, "end", stop.end());
-            }
-        }
-
-        ArrayNode unassignedNodes = root.withArray("unassigned");
-        for (int index = 0; index < response.unassigned().size(); index++) {
-            UnassignedOrderDto order = response.unassigned().get(index);
-            ObjectNode orderNode = (ObjectNode) unassignedNodes.get(index);
-            putOffsetDateTime(orderNode, "since", order.since());
-            putTimeWindow(orderNode, "proposed_slot", order.proposedSlot());
-        }
-
-        ArrayNode pgpNodes = root.withArray("pgp_groups");
-        for (int index = 0; index < response.pgpGroups().size(); index++) {
-            PgpGroupDto group = response.pgpGroups().get(index);
-            putOffsetDateTime((ObjectNode) pgpNodes.get(index), "detected_at", group.detectedAt());
-        }
-
-        ArrayNode cancelledNodes = root.withArray("cancelled");
-        for (int index = 0; index < response.cancelled().size(); index++) {
-            CancelledOrderDto cancelled = response.cancelled().get(index);
-            putOffsetDateTime((ObjectNode) cancelledNodes.get(index),
-                    "cancelled_at", cancelled.cancelledAt());
-        }
-
-        ArrayNode alertNodes = root.withArray("alerts");
-        for (int index = 0; index < response.alerts().size(); index++) {
-            AlertDto alert = response.alerts().get(index);
-            ObjectNode alertNode = (ObjectNode) alertNodes.get(index);
-            putOffsetDateTime(alertNode, "created_at", alert.createdAt());
-            putOffsetDateTime(alertNode, "resolved_at", alert.resolvedAt());
-            putOffsetDateTime(alertNode, "forecast_start", alert.forecastStart());
-            putTimeWindow(alertNode, "proposed_slot", alert.proposedSlot());
-        }
-
-        return root;
-    }
-
-    private void putOffsetDateTime(ObjectNode node, String field, OffsetDateTime value) {
-        if (value != null) {
-            node.put(field, value.toString());
-        }
-    }
-
-    private void putTimeWindow(ObjectNode node, String field, TimeWindowDto value) {
-        if (value == null) {
-            return;
-        }
-        ObjectNode window = (ObjectNode) node.get(field);
-        if (window != null) {
-            window.put("start", value.start().toString());
-            window.put("end", value.end().toString());
-        }
     }
 
     @Transactional(readOnly = true)
@@ -481,6 +413,8 @@ public class DispatchPlanService {
                     .readValue(previousPlanPayload);
         } catch (JsonProcessingException ex) {
             throw new IllegalStateException("Could not read the previously stored plan for H10 validation", ex);
+        } catch (IOException e) {
+            throw new RuntimeException(e);
         }
 
         Map<String, FrozenRoute> result = new HashMap<>();
@@ -1179,6 +1113,14 @@ public class DispatchPlanService {
 
     private UnassignedOrderDto unassigned(String id, String code, String text, String action) {
         return new UnassignedOrderDto(id, code, text, action);
+    }
+
+    private static final class OffsetDateTimeSnapshotSerializer extends JsonSerializer<OffsetDateTime> {
+        @Override
+        public void serialize(OffsetDateTime value, JsonGenerator generator,
+                              SerializerProvider serializers) throws IOException {
+            generator.writeString(value.toString());
+        }
     }
 
     private enum Failure { SLOT, SHIFT, RESTOCK, EQUIPMENT }
