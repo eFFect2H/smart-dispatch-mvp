@@ -10,14 +10,18 @@ import com.dispatch.smartdispatch.exception.v1.V1ApiException;
 import com.dispatch.smartdispatch.repository.v1.DispatchDaySnapshotRepository;
 import com.dispatch.smartdispatch.repository.v1.ReferenceSnapshotRepository;
 import com.dispatch.smartdispatch.repository.v1.TravelMatrixSnapshotRepository;
+import com.fasterxml.jackson.core.JsonGenerator;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.JsonSerializer;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.SerializationFeature;
+import com.fasterxml.jackson.databind.SerializerProvider;
+import com.fasterxml.jackson.databind.module.SimpleModule;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.io.IOException;
 import java.time.Duration;
 import java.time.LocalDate;
 import java.time.LocalTime;
@@ -191,8 +195,9 @@ public class DispatchPlanService {
         validateFrozenPrefixes(response, frozenRoutes);
 
         try {
-            ObjectMapper snapshotMapper = objectMapper.copy()
-                    .disable(SerializationFeature.WRITE_DATES_WITH_CONTEXT_TIME_ZONE);
+            SimpleModule snapshotTimeModule = new SimpleModule("plan-snapshot-offset-date-time");
+            snapshotTimeModule.addSerializer(OffsetDateTime.class, new OffsetDateTimeSnapshotSerializer());
+            ObjectMapper snapshotMapper = objectMapper.copy().registerModule(snapshotTimeModule);
             JsonNode storedPlan = snapshotMapper.valueToTree(response);
             day.updatePlan(response.planVersion(), storedPlan, day.getModelNow());
         } catch (IllegalArgumentException ex) {
@@ -1106,6 +1111,14 @@ public class DispatchPlanService {
 
     private UnassignedOrderDto unassigned(String id, String code, String text, String action) {
         return new UnassignedOrderDto(id, code, text, action);
+    }
+
+    private static final class OffsetDateTimeSnapshotSerializer extends JsonSerializer<OffsetDateTime> {
+        @Override
+        public void serialize(OffsetDateTime value, JsonGenerator generator,
+                              SerializerProvider serializers) throws IOException {
+            generator.writeString(value.toString());
+        }
     }
 
     private enum Failure { SLOT, SHIFT, RESTOCK, EQUIPMENT }
