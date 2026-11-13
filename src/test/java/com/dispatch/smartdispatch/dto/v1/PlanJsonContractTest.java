@@ -24,10 +24,11 @@ class PlanJsonContractTest {
                 List.of(new RouteDto("ST-001", "SC-01", "ACTIVE", List.of(
                         new StopDto(1, "DEPOT_START", "SC-01", now, now, now,
                                 null, 0L, 0L, "PLANNED", new EquipmentDto(2, 1, 0))
-                ))),
+                ), new RouteTotals(0, 0L, 0L, 0, 0.0))),
                 List.of(new UnassignedOrderDto("ORD-20261026-0001", "NO_QUALIFIED_STAFF",
                         "No qualified staff", "REASSIGN")),
-                List.of(), List.of(), List.of(), 12L
+                List.of(), List.of(), List.of(), 12L,
+                new PlanSummary(1, 0, 1, 0, 0, 0L, 0.0)
         );
 
         JsonNode json = mapper.readTree(mapper.writeValueAsString(response));
@@ -47,5 +48,7 @@ class PlanJsonContractTest {
                 .path("equipment_after").path("ONT").asInt());
         assertEquals(1, json.path("routes").get(0).path("stops").get(0)
                 .path("equipment_after").path("ROUTER").asInt());
+        assertEquals(0, json.path("routes").get(0).path("totals").path("visits").asInt());
+        assertEquals(1, json.path("summary").path("orders_total").asInt());
     }
 }

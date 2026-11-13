@@ -2,6 +2,7 @@ package com.dispatch.smartdispatch.service.v1;
 
 import com.dispatch.smartdispatch.dto.v1.PlanDtos.*;
 import com.dispatch.smartdispatch.dto.v1.V1Dtos.EquipmentDto;
+import com.dispatch.smartdispatch.dto.v1.V1Dtos.TimeWindowDto;
 import com.dispatch.smartdispatch.entity.v1.DispatchDaySnapshotEntity;
 import com.dispatch.smartdispatch.entity.v1.ReferenceSnapshotEntity;
 import com.dispatch.smartdispatch.entity.v1.TravelMatrixSnapshotEntity;
@@ -14,6 +15,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.Duration;
 import java.time.LocalDate;
 import java.time.LocalTime;
 import java.time.OffsetDateTime;
@@ -24,6 +26,8 @@ public class DispatchPlanService {
     private static final String VISIT = "VISIT";
     private static final String RESTOCK = "RESTOCK";
     private static final String BREAK = "BREAK";
+    private static final String DEPOT_END = "DEPOT_END";
+    private static final Duration PGP_WINDOW = Duration.ofMinutes(60);
 
     private final DispatchDaySnapshotRepository dayRepository;
     private final ReferenceSnapshotRepository referenceRepository;
@@ -70,13 +74,21 @@ public class DispatchPlanService {
                 .thenComparing(order -> order.path("latest_start").asText())
                 .thenComparing(order -> order.path("order_id").asText()));
 
+        PgpDetection pgp = detectPgpGroups(date, orders, workTypes);
+        Set<String> pgpOrderIds = pgp.orderIds;
         List<UnassignedOrderDto> unassigned = new ArrayList<>();
+        List<AlertDto> alerts = new ArrayList<>(pgp.alerts);
+
         for (JsonNode order : orders) {
             String orderId = order.path("order_id").asText();
+            if (pgpOrderIds.contains(orderId)) {
+                continue;
+            }
+
             JsonNode workType = workTypes.get(order.path("work_type_code").asText());
             if (workType == null) {
-                unassigned.add(unassigned(orderId, "OTHER",
-                        "No work type definition is available for this order", "ESCALATE"));
+                addUnassigned(unassigned, alerts, orderId, "OTHER",
+                        "No work type definition is available for this order", "ESCALATE", day.getModelNow());
                 continue;
             }
 
@@ -84,9 +96,9 @@ public class DispatchPlanService {
                     .filter(candidate -> isQualified(candidate, order, workType))
                     .toList();
             if (qualified.isEmpty()) {
-                unassigned.add(unassigned(orderId, "NO_QUALIFIED_STAFF",
+                addUnassigned(unassigned, alerts, orderId, "NO_QUALIFIED_STAFF",
                         "No staff member satisfies the order profile, technology and height requirements",
-                        "REASSIGN"));
+                        "RESCHEDULE", day.getModelNow());
                 continue;
             }
 
@@ -94,8 +106,9 @@ public class DispatchPlanService {
                     .filter(candidate -> !candidate.unavailable)
                     .toList();
             if (available.isEmpty()) {
-                unassigned.add(unassigned(orderId, "STAFF_UNAVAILABLE",
-                        "All qualified staff members are marked absent for this day", "REASSIGN"));
+                addUnassigned(unassigned, alerts, orderId, "STAFF_UNAVAILABLE",
+                        "All qualified staff members are marked absent for this day",
+                        "REASSIGN", day.getModelNow());
                 continue;
             }
 
@@ -118,20 +131,20 @@ public class DispatchPlanService {
 
             if (best == null) {
                 if (!anyCapacity || restockBlocked) {
-                    unassigned.add(unassigned(orderId, "NO_EQUIPMENT",
+                    addUnassigned(unassigned, alerts, orderId, "NO_EQUIPMENT",
                             "Required equipment is unavailable and no valid restock stop can be scheduled",
-                            "RESCHEDULE"));
+                            "RESCHEDULE", day.getModelNow());
                 } else if (slotBlocked) {
-                    unassigned.add(unassigned(orderId, "SLOT_UNREACHABLE",
+                    addUnassigned(unassigned, alerts, orderId, "SLOT_UNREACHABLE",
                             "No qualified available staff member can reach the order within its allowed start window",
-                            "RESCHEDULE"));
+                            "RESCHEDULE", day.getModelNow());
                 } else if (shiftBlocked) {
-                    unassigned.add(unassigned(orderId, "NO_SHIFT_TIME",
+                    addUnassigned(unassigned, alerts, orderId, "NO_SHIFT_TIME",
                             "The visit, mandatory break and return to the service center do not fit inside a qualified staff shift",
-                            "RESCHEDULE"));
+                            "RESCHEDULE", day.getModelNow());
                 } else {
-                    unassigned.add(unassigned(orderId, "OTHER",
-                            "No feasible route insertion was found", "ESCALATE"));
+                    addUnassigned(unassigned, alerts, orderId, "OTHER",
+                            "No feasible route insertion was found", "ESCALATE", day.getModelNow());
                 }
                 continue;
             }
@@ -142,22 +155,27 @@ public class DispatchPlanService {
         }
 
         List<RouteDto> routes = buildRoutes(staff, centers, matrix);
-        int nextVersion = day.getPlanVersion() + 1;
+        PlanQuality quality = calculateQuality(orders.size(), routes, unassigned.size(),
+                pgp.groups, 0);
         long computationMs = Math.max(0L, (System.nanoTime() - startedAt) / 1_000_000L);
         PlanResponse response = new PlanResponse(
                 date,
-                nextVersion,
+                day.getPlanVersion() + 1,
                 day.getModelNow(),
                 routes,
                 unassigned,
+                pgp.groups,
                 List.of(),
-                List.of(),
-                List.of(),
-                computationMs
+                alerts,
+                computationMs,
+                quality.summary
         );
 
+        validatePlan(response, orders, workTypes, reference, matrix, centers,
+                day.getPayload(), date, day.getModelNow());
+
         try {
-            day.updatePlan(nextVersion, objectMapper.valueToTree(response), day.getModelNow());
+            day.updatePlan(response.planVersion(), objectMapper.valueToTree(response), day.getModelNow());
         } catch (IllegalArgumentException ex) {
             throw new IllegalStateException("Could not serialize generated plan", ex);
         }
@@ -230,7 +248,6 @@ public class DispatchPlanService {
         boolean shiftBlocked = false;
         boolean restockBlocked = false;
 
-        // Try every insertion point. The BREAK is scheduled at the previous stop's location.
         for (int breakPosition = 0; breakPosition <= activities.size(); breakPosition++) {
             ScheduleAttempt attempt = scheduleAt(staff, activities, breakPosition, centers, matrix);
             slotBlocked |= attempt.failure == Failure.SLOT;
@@ -356,10 +373,13 @@ public class DispatchPlanService {
         List<RouteDto> routes = new ArrayList<>();
         for (StaffState state : staff) {
             if (state.unavailable) {
-                routes.add(new RouteDto(state.staffId, state.serviceCenterId, "UNAVAILABLE", List.of()));
+                routes.add(new RouteDto(state.staffId, state.serviceCenterId, "UNAVAILABLE",
+                        List.of(), emptyTotals()));
                 continue;
             }
             if (state.activities.isEmpty()) {
+                routes.add(new RouteDto(state.staffId, state.serviceCenterId, "ACTIVE",
+                        List.of(), emptyTotals()));
                 continue;
             }
 
@@ -387,9 +407,373 @@ public class DispatchPlanService {
                     schedule.depotArrival, schedule.depotArrival, schedule.depotArrival,
                     null, schedule.returnTravelSec, schedule.returnDistanceM,
                     "PLANNED", toDto(schedule.finalEquipment)));
-            routes.add(new RouteDto(state.staffId, state.serviceCenterId, "ACTIVE", stops));
+            routes.add(new RouteDto(state.staffId, state.serviceCenterId, "ACTIVE",
+                    stops, routeTotals(state, schedule)));
         }
         return routes;
+    }
+
+    private PgpDetection detectPgpGroups(LocalDate date, List<JsonNode> orders,
+                                         Map<String, JsonNode> workTypes) {
+        Map<String, List<JsonNode>> byAccessNode = new TreeMap<>();
+        for (JsonNode order : orders) {
+            JsonNode workType = workTypes.get(order.path("work_type_code").asText());
+            if (workType == null || !workType.path("pgp_relevant").asBoolean(false)) {
+                continue;
+            }
+            byAccessNode.computeIfAbsent(order.path("access_node_id").asText(), ignored -> new ArrayList<>())
+                    .add(order);
+        }
+
+        List<PgpGroupDto> groups = new ArrayList<>();
+        List<AlertDto> alerts = new ArrayList<>();
+        Set<String> groupedOrderIds = new HashSet<>();
+        int groupSequence = 1;
+        int alertSequence = 1;
+
+        for (Map.Entry<String, List<JsonNode>> entry : byAccessNode.entrySet()) {
+            List<JsonNode> candidates = entry.getValue();
+            candidates.sort(Comparator.comparing(order -> parseTime(order.path("registered_at"))));
+            List<GroupWindow> windows = new ArrayList<>();
+
+            for (int start = 0; start < candidates.size(); start++) {
+                int end = start;
+                OffsetDateTime startTime = parseTime(candidates.get(start).path("registered_at"));
+                while (end < candidates.size()
+                        && Duration.between(startTime,
+                        parseTime(candidates.get(end).path("registered_at"))).compareTo(PGP_WINDOW) <= 0) {
+                    end++;
+                }
+                if (end - start < 3) {
+                    continue;
+                }
+
+                if (!windows.isEmpty() && start <= windows.get(windows.size() - 1).endIndex) {
+                    GroupWindow previous = windows.get(windows.size() - 1);
+                    previous.endIndex = Math.max(previous.endIndex, end - 1);
+                } else {
+                    OffsetDateTime detectedAt = parseTime(candidates.get(start + 2).path("registered_at"));
+                    windows.add(new GroupWindow(start, end - 1, detectedAt));
+                }
+            }
+
+            for (GroupWindow window : windows) {
+                List<String> ids = new ArrayList<>();
+                for (int i = window.startIndex; i <= window.endIndex; i++) {
+                    String id = candidates.get(i).path("order_id").asText();
+                    if (groupedOrderIds.add(id)) {
+                        ids.add(id);
+                    }
+                }
+                if (ids.size() < 3) {
+                    continue;
+                }
+
+                String groupId = "PGP-" + date.toString().replace("-", "") + "-"
+                        + String.format(Locale.ROOT, "%02d", groupSequence++);
+                String comment = ids.size() + " обращений с узла доступа за 60 минут";
+                groups.add(new PgpGroupDto(groupId, entry.getKey(), ids,
+                        window.detectedAt, "TRANSFER_TO_STATION", comment));
+                alerts.add(new AlertDto(
+                        "ALR-" + date.toString().replace("-", "") + "-"
+                                + String.format(Locale.ROOT, "%04d", alertSequence++),
+                        window.detectedAt,
+                        "PGP_DETECTED",
+                        "ACTIVE",
+                        "TRANSFER_TO_STATION",
+                        "ПГП на " + entry.getKey() + ": " + ids.size()
+                                + " наряда переданы в станционное подразделение",
+                        null, null, groupId, null, null, null, null, null, true
+                ));
+            }
+        }
+        return new PgpDetection(groups, groupedOrderIds, alerts);
+    }
+
+    private void addUnassigned(List<UnassignedOrderDto> unassigned, List<AlertDto> alerts,
+                               String orderId, String reasonCode, String reasonText,
+                               String action, OffsetDateTime asOf) {
+        unassigned.add(new UnassignedOrderDto(orderId, reasonCode, reasonText, action, null, asOf));
+        alerts.add(new AlertDto(
+                "ALR-" + asOf.toLocalDate().toString().replace("-", "") + "-"
+                        + String.format(Locale.ROOT, "%04d", alerts.size() + 1),
+                asOf, "UNASSIGNED", "ACTIVE", action, reasonText,
+                null, orderId, null, null, null, null, null, null, false
+        ));
+    }
+
+    private PlanQuality calculateQuality(int ordersTotal, List<RouteDto> routes,
+                                         int unassignedCount, List<PgpGroupDto> pgpGroups,
+                                         int cancelledCount) {
+        int visits = 0;
+        long travelSecTotal = 0L;
+        int pgpOrders = 0;
+        List<Double> utilization = new ArrayList<>();
+
+        for (RouteDto route : routes) {
+            if (route.totals() == null) {
+                continue;
+            }
+            visits += route.totals().visits();
+            travelSecTotal += route.totals().travelSec();
+            if ("ACTIVE".equals(route.status())) {
+                utilization.add(route.totals().utilization());
+            }
+        }
+        for (PgpGroupDto group : pgpGroups) {
+            pgpOrders += group.orderIds().size();
+        }
+
+        return new PlanQuality(new PlanSummary(
+                ordersTotal, visits, unassignedCount, pgpOrders, cancelledCount,
+                travelSecTotal, coefficientOfVariation(utilization)
+        ));
+    }
+
+    private double coefficientOfVariation(List<Double> values) {
+        if (values.isEmpty()) {
+            return 0.0;
+        }
+        double mean = values.stream().mapToDouble(Double::doubleValue).average().orElse(0.0);
+        if (mean <= 0.0) {
+            return 0.0;
+        }
+        double variance = values.stream()
+                .mapToDouble(value -> (value - mean) * (value - mean))
+                .average().orElse(0.0);
+        return Math.sqrt(variance) / mean;
+    }
+
+    private RouteTotals routeTotals(StaffState staff, ScheduleResult schedule) {
+        int workMin = 0;
+        int visits = 0;
+        for (ScheduledActivity activity : schedule.activities) {
+            if (VISIT.equals(activity.type)) {
+                visits++;
+                workMin += Math.toIntExact(Duration.between(activity.start, activity.end).toMinutes());
+            }
+        }
+        long shiftMinutes = Duration.between(staff.shiftStart, staff.shiftEnd).toMinutes();
+        long availableMinutes = Math.max(0L, shiftMinutes - staff.breakDurationMin);
+        double utilization = availableMinutes == 0L ? 0.0
+                : (workMin + schedule.totalTravelSec / 60.0) / availableMinutes;
+        return new RouteTotals(visits, schedule.totalTravelSec,
+                schedule.totalDistanceM, workMin, utilization);
+    }
+
+    private RouteTotals emptyTotals() {
+        return new RouteTotals(0, 0L, 0L, 0, 0.0);
+    }
+
+    private void validatePlan(PlanResponse plan, List<JsonNode> inputOrders,
+                              Map<String, JsonNode> workTypes, JsonNode reference,
+                              MatrixView matrix, Map<String, ServiceCenter> centers,
+                              JsonNode dayPayload, LocalDate date, OffsetDateTime modelNow) {
+        Map<String, JsonNode> ordersById = new HashMap<>();
+        inputOrders.forEach(order -> ordersById.put(order.path("order_id").asText(), order));
+        Map<String, JsonNode> staffById = indexBy(reference.path("staff"), "staff_id");
+        Set<String> absent = values(dayPayload.path("absent_staff_ids"));
+        Map<String, Integer> placements = new HashMap<>();
+        Set<String> routeStaffIds = new HashSet<>();
+
+        if (plan.routes().size() != staffById.size()) {
+            throw new IllegalStateException("H9/route coverage: expected one route per staff member");
+        }
+
+        for (RouteDto route : plan.routes()) {
+            JsonNode staffNode = staffById.get(route.staffId());
+            if (staffNode == null || !routeStaffIds.add(route.staffId())) {
+                throw new IllegalStateException("Unknown or duplicate staff route: " + route.staffId());
+            }
+            boolean unavailable = absent.contains(route.staffId());
+            if (unavailable) {
+                if (!"UNAVAILABLE".equals(route.status()) || !route.stops().isEmpty()) {
+                    throw new IllegalStateException("Unavailable staff must have an empty UNAVAILABLE route");
+                }
+                continue;
+            }
+            if (!"ACTIVE".equals(route.status())) {
+                throw new IllegalStateException("Available staff route must have ACTIVE status");
+            }
+            if (route.stops().isEmpty()) {
+                continue;
+            }
+
+            JsonNode shift = staffNode.path("shift");
+            OffsetDateTime shiftStart = at(date, LocalTime.parse(shift.path("start").asText()), modelNow);
+            OffsetDateTime shiftEnd = at(date, LocalTime.parse(shift.path("end").asText()), modelNow);
+            OffsetDateTime breakFrom = at(date,
+                    LocalTime.parse(shift.path("break_window").path("from").asText()), modelNow);
+            OffsetDateTime breakTo = at(date,
+                    LocalTime.parse(shift.path("break_window").path("to").asText()), modelNow);
+            int breakDurationMin = shift.path("break_duration_min").asInt();
+            String homeCenterId = staffNode.path("service_center_id").asText();
+            List<StopDto> stops = route.stops();
+
+            if (!"DEPOT_START".equals(stops.get(0).type())
+                    || !"DEPOT_END".equals(stops.get(stops.size() - 1).type())) {
+                throw new IllegalStateException("H8: route must start and end at a depot stop");
+            }
+            StopDto depotStart = stops.get(0);
+            if (!homeCenterId.equals(depotStart.locationId())
+                    || !depotStart.arrival().equals(depotStart.start())
+                    || !depotStart.start().equals(depotStart.end())
+                    || depotStart.start().isBefore(shiftStart)) {
+                throw new IllegalStateException("H2/H8: invalid DEPOT_START");
+            }
+
+            int breakCount = 0;
+            Equipment inventory = equipment(staffNode.path("equipment_start"));
+            Equipment capacity = equipment(staffNode.path("equipment_capacity"));
+            assertEquipment(depotStart.equipmentAfter(), inventory, "DEPOT_START");
+
+            StopDto previous = depotStart;
+            for (int index = 1; index < stops.size(); index++) {
+                StopDto stop = stops.get(index);
+                if (stop.seq() != index + 1) {
+                    throw new IllegalStateException("Stop seq must be contiguous for " + route.staffId());
+                }
+                if (stop.arrival().isBefore(shiftStart)
+                        || stop.start().isBefore(shiftStart)
+                        || stop.end().isAfter(shiftEnd)
+                        || stop.start().isBefore(stop.arrival())
+                        || stop.end().isBefore(stop.start())) {
+                    throw new IllegalStateException("H2/H6: stop time is outside shift or has negative duration");
+                }
+
+                if (BREAK.equals(stop.type())) {
+                    breakCount++;
+                    if (breakCount > 1
+                            || !stop.locationId().equals(previous.locationId())
+                            || stop.travelSec() == null || stop.travelSec() != 0L
+                            || !stop.arrival().equals(previous.end())
+                            || stop.start().isBefore(breakFrom) || stop.start().isAfter(breakTo)
+                            || Duration.between(stop.start(), stop.end()).toMinutes() < breakDurationMin) {
+                        throw new IllegalStateException("H3: invalid mandatory BREAK stop");
+                    }
+                } else {
+                    long expectedTravel = matrix.duration(previous.locationId(), stop.locationId());
+                    OffsetDateTime earliestArrival = previous.end().plusSeconds(expectedTravel);
+                    if (stop.arrival().isBefore(earliestArrival)) {
+                        throw new IllegalStateException("H6: arrival precedes matrix travel time");
+                    }
+                    if (stop.travelSec() == null || stop.travelSec() < expectedTravel) {
+                        throw new IllegalStateException("H6: travel_sec is smaller than the matrix value");
+                    }
+                }
+
+                switch (stop.type()) {
+                    case VISIT -> {
+                        JsonNode order = ordersById.get(stop.orderId());
+                        if (order == null || !stop.locationId().equals(order.path("building_id").asText())) {
+                            throw new IllegalStateException("H9/H6: VISIT references unknown order or building");
+                        }
+                        placements.merge(stop.orderId(), 1, Integer::sum);
+                        JsonNode workType = workTypes.get(order.path("work_type_code").asText());
+                        if (workType == null || !isQualified(
+                                staffNode, order, workType)) {
+                            throw new IllegalStateException("H1: VISIT staff does not meet qualification requirements");
+                        }
+                        if (stop.start().isBefore(parseTime(order.path("slot").path("start")))
+                                || stop.start().isAfter(parseTime(order.path("latest_start")))) {
+                            throw new IllegalStateException("H4: VISIT starts outside allowed slot");
+                        }
+                        long duration = Duration.between(stop.start(), stop.end()).toMinutes();
+                        if (duration != workType.path("duration_min").asLong()
+                                || stop.end().isAfter(parseTime(order.path("deadline")))) {
+                            throw new IllegalStateException("H5: VISIT duration or deadline is invalid");
+                        }
+                        Equipment required = equipment(order.path("required_equipment"));
+                        if (!inventory.canCover(required)) {
+                            throw new IllegalStateException("H7: equipment inventory became negative");
+                        }
+                        inventory = inventory.subtract(required);
+                    }
+                    case RESTOCK -> {
+                        ServiceCenter center = centers.get(stop.locationId());
+                        if (center == null) {
+                            throw new IllegalStateException("H8: RESTOCK references unknown service center");
+                        }
+                        OffsetDateTime open = at(date, center.opening, modelNow);
+                        OffsetDateTime close = at(date, center.closing, modelNow);
+                        if (stop.start().isBefore(open) || stop.end().isAfter(close)
+                                || Duration.between(stop.start(), stop.end()).toMinutes()
+                                < center.restockDurationMin) {
+                            throw new IllegalStateException("H8: RESTOCK is outside service center opening hours");
+                        }
+                        inventory = capacity;
+                    }
+                    case BREAK -> { /* Inventory does not change during a break. */ }
+                    case DEPOT_END -> {
+                        if (!homeCenterId.equals(stop.locationId())
+                                || !stop.arrival().equals(stop.start())
+                                || !stop.start().equals(stop.end())) {
+                            throw new IllegalStateException("H8: invalid DEPOT_END");
+                        }
+                    }
+                    default -> throw new IllegalStateException("Unknown stop type: " + stop.type());
+                }
+                assertEquipment(stop.equipmentAfter(), inventory, stop.type());
+                previous = stop;
+            }
+
+            boolean hasVisits = stops.stream().anyMatch(stop -> VISIT.equals(stop.type()));
+            if ((hasVisits && breakCount != 1) || (!hasVisits && breakCount != 0)) {
+                throw new IllegalStateException("H3: route must contain exactly one BREAK when it has visits");
+            }
+            StopDto depotEnd = stops.get(stops.size() - 1);
+            if (depotEnd.arrival().isAfter(shiftEnd)) {
+                throw new IllegalStateException("H2: DEPOT_END is after shift end");
+            }
+        }
+
+        for (UnassignedOrderDto order : plan.unassigned()) {
+            placements.merge(order.orderId(), 1, Integer::sum);
+        }
+        for (PgpGroupDto group : plan.pgpGroups()) {
+            if (new HashSet<>(group.orderIds()).size() != group.orderIds().size()
+                    || group.orderIds().size() < 3) {
+                throw new IllegalStateException("PGP group must contain at least three unique orders");
+            }
+            for (String orderId : group.orderIds()) {
+                JsonNode order = ordersById.get(orderId);
+                if (order == null) {
+                    throw new IllegalStateException("PGP group references unknown order " + orderId);
+                }
+                JsonNode workType = workTypes.get(order.path("work_type_code").asText());
+                if (workType == null || !workType.path("pgp_relevant").asBoolean(false)
+                        || !group.accessNodeId().equals(order.path("access_node_id").asText())) {
+                    throw new IllegalStateException("PGP group contains an ineligible order");
+                }
+                placements.merge(orderId, 1, Integer::sum);
+            }
+        }
+        for (CancelledOrderDto cancelled : plan.cancelled()) {
+            placements.merge(cancelled.orderId(), 1, Integer::sum);
+        }
+
+        if (!placements.keySet().equals(ordersById.keySet())
+                || placements.values().stream().anyMatch(count -> count != 1)) {
+            throw new IllegalStateException("H9: each input order must appear exactly once in the plan");
+        }
+    }
+
+    private boolean isQualified(JsonNode staff, JsonNode order, JsonNode workType) {
+        Set<String> staffProfiles = values(staff.path("profiles"));
+        Set<String> requiredProfiles = values(workType.path("profiles"));
+        boolean profileMatch = staffProfiles.stream().anyMatch(requiredProfiles::contains);
+        boolean technologyMatch = values(staff.path("technologies"))
+                .contains(order.path("technology").asText());
+        boolean heightMatch = !order.path("requires_height").asBoolean()
+                || staff.path("height_permit").asBoolean();
+        return profileMatch && technologyMatch && heightMatch;
+    }
+
+    private void assertEquipment(EquipmentDto actual, Equipment expected, String stopType) {
+        if (actual == null || actual.ont() != expected.ont
+                || actual.router() != expected.router || actual.stb() != expected.stb) {
+            throw new IllegalStateException("H7: equipment_after is inconsistent at " + stopType);
+        }
     }
 
     private Map<String, ServiceCenter> parseServiceCenters(JsonNode array) {
@@ -506,7 +890,6 @@ public class DispatchPlanService {
         }
         long addedTravelSec = Math.max(0L, candidate.totalTravelSec - baselineTravelSec);
         long addedElapsedSec = Math.max(0L, candidate.depotArrival.toEpochSecond() - baselineFinish);
-        // Prefer the smallest added travel; elapsed time is a deterministic tie-breaker.
         return addedTravelSec * 1_000_000L + Math.min(addedElapsedSec, 999_999L);
     }
 
@@ -637,6 +1020,23 @@ public class DispatchPlanService {
                     slotBlocked, shiftBlocked, restockBlocked);
         }
     }
+
+    private record PgpDetection(List<PgpGroupDto> groups, Set<String> orderIds,
+                                List<AlertDto> alerts) { }
+
+    private static final class GroupWindow {
+        private final int startIndex;
+        private int endIndex;
+        private final OffsetDateTime detectedAt;
+
+        private GroupWindow(int startIndex, int endIndex, OffsetDateTime detectedAt) {
+            this.startIndex = startIndex;
+            this.endIndex = endIndex;
+            this.detectedAt = detectedAt;
+        }
+    }
+
+    private record PlanQuality(PlanSummary summary) { }
 
     private record MatrixView(Map<String, Integer> indexes, JsonNode durations, JsonNode distances) {
         private MatrixView(JsonNode payload) {

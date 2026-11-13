@@ -1,6 +1,7 @@
 package com.dispatch.smartdispatch.dto.v1;
 
 import com.dispatch.smartdispatch.dto.v1.V1Dtos.EquipmentDto;
+import com.dispatch.smartdispatch.dto.v1.V1Dtos.TimeWindowDto;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.databind.PropertyNamingStrategies;
 import com.fasterxml.jackson.databind.annotation.JsonNaming;
@@ -20,6 +21,7 @@ public final class PlanDtos {
     ) { }
 
     @JsonNaming(PropertyNamingStrategies.SnakeCaseStrategy.class)
+    @JsonInclude(JsonInclude.Include.NON_NULL)
     public record PlanResponse(
             LocalDate date,
             int planVersion,
@@ -29,16 +31,30 @@ public final class PlanDtos {
             List<PgpGroupDto> pgpGroups,
             List<CancelledOrderDto> cancelled,
             List<AlertDto> alerts,
-            long computationMs
-    ) { }
+            long computationMs,
+            PlanSummary summary
+    ) {
+        public PlanResponse(LocalDate date, int planVersion, OffsetDateTime asOf,
+                            List<RouteDto> routes, List<UnassignedOrderDto> unassigned,
+                            List<PgpGroupDto> pgpGroups, List<CancelledOrderDto> cancelled,
+                            List<AlertDto> alerts, long computationMs) {
+            this(date, planVersion, asOf, routes, unassigned, pgpGroups,
+                    cancelled, alerts, computationMs, null);
+        }
+    }
 
     @JsonNaming(PropertyNamingStrategies.SnakeCaseStrategy.class)
     public record RouteDto(
             String staffId,
             String serviceCenterId,
             String status,
-            List<StopDto> stops
-    ) { }
+            List<StopDto> stops,
+            RouteTotals totals
+    ) {
+        public RouteDto(String staffId, String serviceCenterId, String status, List<StopDto> stops) {
+            this(staffId, serviceCenterId, status, stops, null);
+        }
+    }
 
     @JsonNaming(PropertyNamingStrategies.SnakeCaseStrategy.class)
     @JsonInclude(JsonInclude.Include.NON_NULL)
@@ -64,12 +80,40 @@ public final class PlanDtos {
     }
 
     @JsonNaming(PropertyNamingStrategies.SnakeCaseStrategy.class)
+    public record RouteTotals(
+            int visits,
+            long travelSec,
+            long distanceM,
+            int workMin,
+            double utilization
+    ) { }
+
+    @JsonNaming(PropertyNamingStrategies.SnakeCaseStrategy.class)
+    public record PlanSummary(
+            int ordersTotal,
+            int visitsPlanned,
+            int unassigned,
+            int pgpOrders,
+            int cancelled,
+            long travelSecTotal,
+            double utilizationCv
+    ) { }
+
+    @JsonNaming(PropertyNamingStrategies.SnakeCaseStrategy.class)
+    @JsonInclude(JsonInclude.Include.NON_NULL)
     public record UnassignedOrderDto(
             String orderId,
             String reasonCode,
             String reasonText,
-            String suggestedAction
-    ) { }
+            String suggestedAction,
+            TimeWindowDto proposedSlot,
+            OffsetDateTime since
+    ) {
+        public UnassignedOrderDto(String orderId, String reasonCode,
+                                  String reasonText, String suggestedAction) {
+            this(orderId, reasonCode, reasonText, suggestedAction, null, null);
+        }
+    }
 
     @JsonNaming(PropertyNamingStrategies.SnakeCaseStrategy.class)
     public record PgpGroupDto(
@@ -103,7 +147,7 @@ public final class PlanDtos {
             OffsetDateTime forecastStart,
             Integer latenessMin,
             String suggestedStaffId,
-            String proposedSlot,
+            TimeWindowDto proposedSlot,
             Boolean applied
     ) { }
 }
