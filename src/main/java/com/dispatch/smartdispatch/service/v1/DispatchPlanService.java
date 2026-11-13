@@ -26,6 +26,7 @@ public class DispatchPlanService {
     private static final String VISIT = "VISIT";
     private static final String RESTOCK = "RESTOCK";
     private static final String BREAK = "BREAK";
+    private static final String DEPOT_END = "DEPOT_END";
     private static final Duration PGP_WINDOW = Duration.ofMinutes(60);
 
     private final DispatchDaySnapshotRepository dayRepository;
