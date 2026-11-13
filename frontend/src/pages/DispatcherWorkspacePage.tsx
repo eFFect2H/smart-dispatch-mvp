@@ -305,7 +305,7 @@ export default function DispatcherWorkspacePage() {
             await uploadDay(date, dayInput);
             await generatePlan(date);
             const [latestPlan, history] = await Promise.all([getPlan(date), getEventHistory(date)]);
-            setAllOrders(orders); setPlan(latestPlan); setEventHistory(history);
+            setAllOrders(orders); setPlan(latestPlan); setEventHistory(history); setEventNow(modelNow);
             setNotice("План v" + latestPlan.plan_version + " построен. В день загружено " + selectedOrders.length + " нарядов.");
             setActivePanel("unassigned");
         } catch (cause) { setError(getErrorMessage(cause)); }
@@ -447,7 +447,7 @@ export default function DispatcherWorkspacePage() {
                                     {points.map(({ stop, lat, lon, title }) => <CircleMarker key={route.staff_id + "-" + stop.seq + "-" + stop.location_id}
                                         center={[lat, lon]} radius={stop.order_id && selectedOrderId === stop.order_id ? 9 : 6}
                                         eventHandlers={{ click: () => setSelectedOrderId(stop.order_id ?? null) }}
-                                        pathOptions={{ color: selectedOrderId === stop.order_id ? "#111827" : color, fillColor: color, fillOpacity: 0.9, weight: selectedOrderId === stop.order_id ? 3 : 1 }}>
+                                        pathOptions={{ color: stop.order_id && selectedOrderId === stop.order_id ? "#111827" : color, fillColor: color, fillOpacity: 0.9, weight: stop.order_id && selectedOrderId === stop.order_id ? 3 : 1 }}>
                                         <Popup><strong>{stop.type}</strong><br />{stop.order_id || stop.location_id}<br />{title}<br />{formatTime(stop.start)}–{formatTime(stop.end)}<br />{route.staff_id}</Popup>
                                     </CircleMarker>)}
                                 </Fragment>;
