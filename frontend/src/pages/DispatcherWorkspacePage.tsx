@@ -381,7 +381,7 @@ export default function DispatcherWorkspacePage() {
                             const value = event.target.value; setDate(value);
                             setModelNow(value + modelNow.slice(10)); setEventNow(value + eventNow.slice(10));
                         }} /></label>
-                    <button className="secondary-button" type="button" onClick={() => void handleRefresh()} disabled={refreshing || !plan}>
+                    <button className="secondary-button" type="button" onClick={() => void handleRefresh()} disabled={refreshing}>
                         <RefreshCw size={15} className={refreshing ? "v1-spin" : ""} /> Обновить
                     </button>
                 </div>
@@ -446,6 +446,7 @@ export default function DispatcherWorkspacePage() {
                                     {positions.length > 1 && <Polyline positions={positions} pathOptions={{ color, weight: 4, opacity: 0.75 }} />}
                                     {points.map(({ stop, lat, lon, title }) => <CircleMarker key={route.staff_id + "-" + stop.seq + "-" + stop.location_id}
                                         center={[lat, lon]} radius={stop.order_id && selectedOrderId === stop.order_id ? 9 : 6}
+                                        eventHandlers={{ click: () => setSelectedOrderId(stop.order_id ?? null) }}
                                         pathOptions={{ color: selectedOrderId === stop.order_id ? "#111827" : color, fillColor: color, fillOpacity: 0.9, weight: selectedOrderId === stop.order_id ? 3 : 1 }}>
                                         <Popup><strong>{stop.type}</strong><br />{stop.order_id || stop.location_id}<br />{title}<br />{formatTime(stop.start)}–{formatTime(stop.end)}<br />{route.staff_id}</Popup>
                                     </CircleMarker>)}
