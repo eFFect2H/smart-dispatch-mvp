@@ -110,7 +110,22 @@ export default function TeamsPage() {
     }
 
     useEffect(() => {
-        void loadTeams();
+        let isActive = true;
+
+        getTeams()
+            .then((data) => {
+                if (isActive) setTeams(data);
+            })
+            .catch((err: unknown) => {
+                if (isActive) setError(getErrorMessage(err));
+            })
+            .finally(() => {
+                if (isActive) setLoading(false);
+            });
+
+        return () => {
+            isActive = false;
+        };
     }, []);
 
     const filteredTeams = teams.filter((team) => {
