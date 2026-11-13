@@ -205,6 +205,41 @@ class DispatchPlanServiceTest {
     }
 
     @Test
+    void preservesNextStopAsSoonAsItsTravelLegHasDeparted() throws Exception {
+        Fixture fixture = fixture("""
+                {"ONT":1,"ROUTER":0,"STB":0}
+                """, """
+                {"ONT":1,"ROUTER":0,"STB":0}
+                """, true, true);
+
+        PlanDtos.PlanResponse firstPlan =
+                fixture.service.generate(DATE, new PlanDtos.PlanRequest(60));
+        PlanDtos.RouteDto firstRoute = firstPlan.routes().get(0);
+        PlanDtos.StopDto firstVisit = firstRoute.stops().stream()
+                .filter(stop -> "ORD-20261026-0001".equals(stop.orderId()))
+                .findFirst().orElseThrow();
+
+        OffsetDateTime departureTime = firstRoute.stops().get(0).end().plusSeconds(1);
+        assertTrue(departureTime.isBefore(firstVisit.arrival()),
+                "The scenario must advance model time while the first visit is still en route");
+
+        fixture.day.advanceModelNow(departureTime);
+        PlanDtos.PlanResponse secondPlan =
+                fixture.service.generate(DATE, new PlanDtos.PlanRequest(60));
+
+        PlanDtos.RouteDto secondRoute = secondPlan.routes().stream()
+                .filter(route -> route.staffId().equals(firstRoute.staffId()))
+                .findFirst().orElseThrow();
+        PlanDtos.StopDto preservedVisit = secondRoute.stops().stream()
+                .filter(stop -> "ORD-20261026-0001".equals(stop.orderId()))
+                .findFirst().orElseThrow();
+
+        assertEquals(firstVisit, preservedVisit,
+                "H10 must freeze the destination and planned schedule after departure");
+        assertEquals(firstPlan.planVersion() + 1, secondPlan.planVersion());
+    }
+
+    @Test
     void doesNotInsertASecondBreakWhileTheOriginalBreakIsInProgress() throws Exception {
         Fixture fixture = fixture("""
                 {"ONT":1,"ROUTER":0,"STB":0}
