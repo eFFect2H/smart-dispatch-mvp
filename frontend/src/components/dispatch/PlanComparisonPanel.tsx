@@ -57,7 +57,9 @@ export default function PlanComparisonPanel({ comparison, onClose }: PlanCompari
                 <div>
                     <h2><GitCompare size={17} /> Изменения после перепланирования</h2>
                     <p>
-                        Версия v{comparison.before.plan_version} → v{comparison.after.plan_version}
+                        {comparison.before.plan_version === comparison.after.plan_version
+                            ? "Версия v" + comparison.after.plan_version + " (пересборка)"
+                            : "Версия v" + comparison.before.plan_version + " → v" + comparison.after.plan_version}
                         {" · "}{comparison.trigger}
                     </p>
                 </div>
