@@ -11,6 +11,7 @@ import com.dispatch.smartdispatch.repository.v1.DispatchDaySnapshotRepository;
 import com.dispatch.smartdispatch.repository.v1.ReferenceSnapshotRepository;
 import com.dispatch.smartdispatch.repository.v1.TravelMatrixSnapshotRepository;
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.stereotype.Service;
@@ -398,7 +399,9 @@ public class DispatchPlanService {
 
         final PlanResponse previousPlan;
         try {
-            previousPlan = objectMapper.treeToValue(previousPlanPayload, PlanResponse.class);
+            previousPlan = objectMapper.readerFor(PlanResponse.class)
+                    .without(DeserializationFeature.ADJUST_DATES_TO_CONTEXT_TIME_ZONE)
+                    .readValue(previousPlanPayload);
         } catch (JsonProcessingException ex) {
             throw new IllegalStateException("Could not read the previously stored plan for H10 validation", ex);
         }
