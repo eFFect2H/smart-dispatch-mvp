@@ -298,8 +298,11 @@ export default function DispatcherWorkspacePage() {
             await uploadReference(nextReference);
             await uploadTravelMatrix(nextMatrix);
             setReference(nextReference);
+            // Replacing reference data resets the backend's loaded day snapshots.
+            setPlan(null); setEventHistory(null); setPlanComparison(null); setSelectedOrderId(null); setAllOrders([]);
             setNotice("Справочники и матрица загружены: " + nextReference.staff.length + " сотрудников, " +
-                nextReference.service_centers.length + " СЦ, " + nextReference.access_nodes.length + " узлов.");
+                nextReference.service_centers.length + " СЦ, " + nextReference.access_nodes.length +
+                " узлов. Состояние дней сброшено — загрузи день заново.");
         } catch (cause) { setError(getErrorMessage(cause)); }
         finally { setUploading(false); }
     }
