@@ -39,15 +39,18 @@ public class DispatchPlanService {
     private final DispatchDaySnapshotRepository dayRepository;
     private final ReferenceSnapshotRepository referenceRepository;
     private final TravelMatrixSnapshotRepository matrixRepository;
+    private final DispatchEventReplayService eventReplayService;
     private final ObjectMapper objectMapper;
 
     public DispatchPlanService(DispatchDaySnapshotRepository dayRepository,
                                ReferenceSnapshotRepository referenceRepository,
                                TravelMatrixSnapshotRepository matrixRepository,
+                               DispatchEventReplayService eventReplayService,
                                ObjectMapper objectMapper) {
         this.dayRepository = dayRepository;
         this.referenceRepository = referenceRepository;
         this.matrixRepository = matrixRepository;
+        this.eventReplayService = eventReplayService;
         this.objectMapper = objectMapper;
     }
 
@@ -73,14 +76,17 @@ public class DispatchPlanService {
         Map<String, FrozenRoute> frozenRoutes =
                 detectFrozenRoutes(day.getPlanPayload(), day.getModelNow());
         Set<String> frozenOrderIds = frozenOrderIds(frozenRoutes);
+        DispatchEventReplayService.ReplayResult replay = eventReplayService.replay(
+                date, day.getPayload(), frozenOrderIds);
+        JsonNode effectiveDayPayload = replay.effectiveDayPayload();
 
-        List<StaffState> staff = parseStaff(reference.path("staff"), day.getPayload(),
+        List<StaffState> staff = parseStaff(reference.path("staff"), effectiveDayPayload,
                 centers, date, day.getModelNow());
         applyFrozenRoutes(staff, frozenRoutes, day.getModelNow());
         staff.sort(Comparator.comparing(candidate -> candidate.staffId));
 
         List<JsonNode> orders = new ArrayList<>();
-        day.getPayload().path("orders").forEach(orders::add);
+        effectiveDayPayload.path("orders").forEach(orders::add);
         orders.sort(Comparator
                 .comparing((JsonNode order) -> parseTime(order.path("slot").path("start")))
                 .thenComparing(order -> order.path("latest_start").asText())
@@ -88,9 +94,15 @@ public class DispatchPlanService {
 
         List<JsonNode> pendingOrders = orders.stream()
                 .filter(order -> !frozenOrderIds.contains(order.path("order_id").asText()))
+                .filter(order -> !replay.cancelledOrderIds().contains(order.path("order_id").asText()))
                 .toList();
-        PgpDetection pgp = detectPgpGroups(date, pendingOrders, workTypes);
+        // An explicit dispatcher transfer takes precedence over automatic PGP grouping.
+        List<JsonNode> pgpCandidates = pendingOrders.stream()
+                .filter(order -> !replay.transferTargets().containsKey(order.path("order_id").asText()))
+                .toList();
+        PgpDetection pgp = detectPgpGroups(date, pgpCandidates, workTypes);
         Set<String> pgpOrderIds = pgp.orderIds;
+        List<CancelledOrderDto> cancelled = new ArrayList<>(replay.cancelledOrders());
         List<UnassignedOrderDto> unassigned = new ArrayList<>();
         List<AlertDto> alerts = new ArrayList<>(pgp.alerts);
 
@@ -107,10 +119,18 @@ public class DispatchPlanService {
                 continue;
             }
 
+            String transferTarget = replay.transferTargets().get(orderId);
             List<StaffState> qualified = staff.stream()
                     .filter(candidate -> isQualified(candidate, order, workType))
+                    .filter(candidate -> transferTarget == null || transferTarget.equals(candidate.staffId))
                     .toList();
             if (qualified.isEmpty()) {
+                if (transferTarget != null) {
+                    addUnassigned(unassigned, alerts, orderId, "TRANSFER_TARGET_NOT_QUALIFIED",
+                            "The requested target staff member does not satisfy this order's qualification requirements",
+                            "REASSIGN", day.getModelNow());
+                    continue;
+                }
                 addUnassigned(unassigned, alerts, orderId, "NO_QUALIFIED_STAFF",
                         "No staff member satisfies the order profile, technology and height requirements",
                         "RESCHEDULE", day.getModelNow());
@@ -175,7 +195,7 @@ public class DispatchPlanService {
 
         List<RouteDto> routes = buildRoutes(staff, centers, matrix);
         PlanQuality quality = calculateQuality(orders.size(), routes, unassigned.size(),
-                pgp.groups, 0);
+                pgp.groups, cancelled.size());
         long computationMs = Math.max(0L, (System.nanoTime() - startedAt) / 1_000_000L);
         PlanResponse response = new PlanResponse(
                 date,
@@ -184,14 +204,14 @@ public class DispatchPlanService {
                 routes,
                 unassigned,
                 pgp.groups,
-                List.of(),
+                cancelled,
                 alerts,
                 computationMs,
                 quality.summary
         );
 
         validatePlan(response, orders, workTypes, reference, matrix, centers,
-                day.getPayload(), date, day.getModelNow(), frozenRoutes);
+                effectiveDayPayload, date, day.getModelNow(), frozenRoutes);
         validateFrozenPrefixes(response, frozenRoutes);
 
         try {

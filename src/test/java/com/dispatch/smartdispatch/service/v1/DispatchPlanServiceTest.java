@@ -1,10 +1,13 @@
 package com.dispatch.smartdispatch.service.v1;
 
 import com.dispatch.smartdispatch.dto.v1.PlanDtos;
+import com.dispatch.smartdispatch.dto.v1.EventDtos.EventType;
 import com.dispatch.smartdispatch.entity.v1.DispatchDaySnapshotEntity;
+import com.dispatch.smartdispatch.entity.v1.DispatchEventEntity;
 import com.dispatch.smartdispatch.entity.v1.ReferenceSnapshotEntity;
 import com.dispatch.smartdispatch.entity.v1.TravelMatrixSnapshotEntity;
 import com.dispatch.smartdispatch.repository.v1.DispatchDaySnapshotRepository;
+import com.dispatch.smartdispatch.repository.v1.DispatchEventRepository;
 import com.dispatch.smartdispatch.repository.v1.ReferenceSnapshotRepository;
 import com.dispatch.smartdispatch.repository.v1.TravelMatrixSnapshotRepository;
 import com.fasterxml.jackson.databind.DeserializationFeature;
@@ -296,6 +299,278 @@ class DispatchPlanServiceTest {
         assertEquals(firstPlan.planVersion() + 1, secondPlan.planVersion());
     }
 
+    @Test
+    void replaysNewOrderIntoTheNextPlanWithoutMutatingTheBaseSnapshot() throws Exception {
+        Fixture fixture = fixture("""
+                {"ONT":3,"ROUTER":0,"STB":0}
+                """, """
+                {"ONT":3,"ROUTER":0,"STB":0}
+                """, true, true);
+
+        OffsetDateTime occurredAt = NOW.plusMinutes(10);
+        fixture.day.advanceModelNow(occurredAt);
+        DispatchEventEntity event = new DispatchEventEntity(
+                DATE, "EVT-NEW-001", EventType.NEW_ORDER, occurredAt,
+                "ORD-20261026-0003", null, null, mapper().readTree("""
+                    {
+                      "order": {
+                        "order_id":"ORD-20261026-0003",
+                        "work_type_code":"REPAIR",
+                        "technology":"PON",
+                        "building_id":"B-00002",
+                        "requires_height":false,
+                        "access_node_id":"AN-0001",
+                        "registered_at":"2026-10-26T08:10:00+05:00",
+                        "slot":{"start":"2026-10-26T15:00:00+05:00","end":"2026-10-26T16:00:00+05:00"},
+                        "latest_start":"2026-10-26T15:30:00+05:00",
+                        "deadline":"2026-10-26T16:00:00+05:00",
+                        "required_equipment":{"ONT":1,"ROUTER":0,"STB":0}
+                      }
+                    }
+                    """));
+        when(fixture.eventRepository.findAllByDayDateOrderByEventSequenceAsc(DATE))
+                .thenReturn(List.of(event));
+
+        PlanDtos.PlanResponse plan =
+                fixture.service.generate(DATE, new PlanDtos.PlanRequest(60));
+
+        assertEquals(3, plan.summary().ordersTotal());
+        assertTrue(plan.routes().stream().flatMap(route -> route.stops().stream())
+                .anyMatch(stop -> "ORD-20261026-0003".equals(stop.orderId())));
+        assertEquals(2, fixture.day.getPayload().path("orders").size(),
+                "Event replay must not mutate the imported base snapshot");
+    }
+
+    @Test
+    void movesCancelledUnstartedOrderIntoCancelledCollection() throws Exception {
+        Fixture fixture = fixture("""
+                {"ONT":1,"ROUTER":0,"STB":0}
+                """, """
+                {"ONT":1,"ROUTER":0,"STB":0}
+                """, true, true);
+        PlanDtos.PlanResponse previous =
+                fixture.service.generate(DATE, new PlanDtos.PlanRequest(60));
+        String staffId = previous.routes().get(0).staffId();
+
+        OffsetDateTime occurredAt = NOW.plusMinutes(1);
+        fixture.day.advanceModelNow(occurredAt);
+        DispatchEventEntity event = new DispatchEventEntity(
+                DATE, "EVT-CANCEL-001", EventType.ORDER_CANCELLED, occurredAt,
+                "ORD-20261026-0002", null, null, mapper().createObjectNode());
+        when(fixture.eventRepository.findAllByDayDateOrderByEventSequenceAsc(DATE))
+                .thenReturn(List.of(event));
+
+        PlanDtos.PlanResponse replanned =
+                fixture.service.generate(DATE, new PlanDtos.PlanRequest(60));
+        PlanDtos.RouteDto route = replanned.routes().stream()
+                .filter(candidate -> candidate.staffId().equals(staffId))
+                .findFirst().orElseThrow();
+
+        assertEquals(1, replanned.cancelled().size());
+        assertEquals("ORD-20261026-0002", replanned.cancelled().get(0).orderId());
+        assertEquals(1, replanned.summary().cancelled());
+        assertTrue(route.stops().stream()
+                .noneMatch(stop -> "ORD-20261026-0002".equals(stop.orderId())));
+        assertTrue(route.stops().stream()
+                .anyMatch(stop -> "ORD-20261026-0001".equals(stop.orderId())),
+                "The frozen first visit must remain on its original route");
+    }
+
+    @Test
+    void appliesVisitDelayToAllSchedulingWindowFields() throws Exception {
+        Fixture fixture = fixture("""
+                {"ONT":1,"ROUTER":0,"STB":0}
+                """, """
+                {"ONT":1,"ROUTER":0,"STB":0}
+                """, true, false);
+        OffsetDateTime occurredAt = NOW.plusMinutes(5);
+        fixture.day.advanceModelNow(occurredAt);
+        DispatchEventEntity event = new DispatchEventEntity(
+                DATE, "EVT-DELAY-001", EventType.VISIT_DELAYED, occurredAt,
+                "ORD-20261026-0001", null, null,
+                mapper().createObjectNode().put("delay_min", 30));
+        when(fixture.eventRepository.findAllByDayDateOrderByEventSequenceAsc(DATE))
+                .thenReturn(List.of(event));
+
+        PlanDtos.PlanResponse plan =
+                fixture.service.generate(DATE, new PlanDtos.PlanRequest(60));
+        PlanDtos.StopDto visit = plan.routes().stream()
+                .flatMap(route -> route.stops().stream())
+                .filter(stop -> "ORD-20261026-0001".equals(stop.orderId()))
+                .findFirst().orElseThrow();
+
+        assertFalse(visit.start().isBefore(OffsetDateTime.parse("2026-10-26T09:30:00+05:00")));
+        assertEquals("2026-10-26T09:00:00+05:00",
+                fixture.day.getPayload().path("orders").get(0).path("slot").path("start").asText(),
+                "The base snapshot must remain unchanged after delay replay");
+    }
+
+    @Test
+    void staffUnavailableEventBlocksNewAssignments() throws Exception {
+        Fixture fixture = fixture("""
+                {"ONT":1,"ROUTER":0,"STB":0}
+                """, """
+                {"ONT":1,"ROUTER":0,"STB":0}
+                """, true, true);
+        OffsetDateTime occurredAt = NOW.plusMinutes(5);
+        fixture.day.advanceModelNow(occurredAt);
+        DispatchEventEntity event = new DispatchEventEntity(
+                DATE, "EVT-ABSENT-001", EventType.STAFF_UNAVAILABLE, occurredAt,
+                null, "ST-001", null, mapper().createObjectNode());
+        when(fixture.eventRepository.findAllByDayDateOrderByEventSequenceAsc(DATE))
+                .thenReturn(List.of(event));
+
+        PlanDtos.PlanResponse plan =
+                fixture.service.generate(DATE, new PlanDtos.PlanRequest(60));
+
+        assertEquals("UNAVAILABLE", plan.routes().get(0).status());
+        assertTrue(plan.routes().get(0).stops().isEmpty());
+        assertEquals(2, plan.unassigned().size());
+        assertTrue(plan.unassigned().stream()
+                .allMatch(order -> "STAFF_UNAVAILABLE".equals(order.reasonCode())));
+    }
+
+    @Test
+    void transferEventPinsAnUnstartedOrderToTheRequestedStaffMember() throws Exception {
+        Fixture fixture = fixture("""
+                {"ONT":1,"ROUTER":0,"STB":0}
+                """, """
+                {"ONT":1,"ROUTER":0,"STB":0}
+                """, true, false, true);
+        OffsetDateTime occurredAt = NOW.plusMinutes(5);
+        fixture.day.advanceModelNow(occurredAt);
+        DispatchEventEntity event = new DispatchEventEntity(
+                DATE, "EVT-TRANSFER-001", EventType.ORDER_TRANSFERRED, occurredAt,
+                "ORD-20261026-0001", null, "ST-002", mapper().createObjectNode());
+        when(fixture.eventRepository.findAllByDayDateOrderByEventSequenceAsc(DATE))
+                .thenReturn(List.of(event));
+
+        PlanDtos.PlanResponse plan =
+                fixture.service.generate(DATE, new PlanDtos.PlanRequest(60));
+
+        PlanDtos.RouteDto targetRoute = plan.routes().stream()
+                .filter(route -> "ST-002".equals(route.staffId()))
+                .findFirst().orElseThrow();
+        assertTrue(targetRoute.stops().stream()
+                .anyMatch(stop -> "ORD-20261026-0001".equals(stop.orderId())));
+        assertTrue(plan.routes().stream()
+                .filter(route -> "ST-001".equals(route.staffId()))
+                .flatMap(route -> route.stops().stream())
+                .noneMatch(stop -> "ORD-20261026-0001".equals(stop.orderId())));
+    }
+
+    @Test
+    void cancellationEventCannotRemoveAnH10FrozenVisit() throws Exception {
+        Fixture fixture = fixture("""
+                {"ONT":1,"ROUTER":0,"STB":0}
+                """, """
+                {"ONT":1,"ROUTER":0,"STB":0}
+                """, true, true);
+        PlanDtos.PlanResponse previous =
+                fixture.service.generate(DATE, new PlanDtos.PlanRequest(60));
+        PlanDtos.RouteDto previousRoute = previous.routes().get(0);
+        PlanDtos.StopDto previousVisit = previousRoute.stops().stream()
+                .filter(stop -> "ORD-20261026-0001".equals(stop.orderId()))
+                .findFirst().orElseThrow();
+
+        OffsetDateTime occurredAt = NOW.plusMinutes(1);
+        fixture.day.advanceModelNow(occurredAt);
+        DispatchEventEntity cancel = new DispatchEventEntity(
+                DATE, "EVT-FROZEN-CANCEL", EventType.ORDER_CANCELLED, occurredAt,
+                "ORD-20261026-0001", null, null, mapper().createObjectNode());
+        when(fixture.eventRepository.findAllByDayDateOrderByEventSequenceAsc(DATE))
+                .thenReturn(List.of(cancel));
+
+        PlanDtos.PlanResponse replanned =
+                fixture.service.generate(DATE, new PlanDtos.PlanRequest(60));
+        PlanDtos.RouteDto route = replanned.routes().stream()
+                .filter(candidate -> candidate.staffId().equals(previousRoute.staffId()))
+                .findFirst().orElseThrow();
+        PlanDtos.StopDto preserved = route.stops().stream()
+                .filter(stop -> "ORD-20261026-0001".equals(stop.orderId()))
+                .findFirst().orElseThrow();
+
+        assertEquals(previousVisit, preserved);
+        assertTrue(replanned.cancelled().isEmpty());
+    }
+
+    @Test
+    void delayAndTransferEventsCannotChangeAnH10FrozenVisit() throws Exception {
+        Fixture fixture = fixture("""
+                {"ONT":1,"ROUTER":0,"STB":0}
+                """, """
+                {"ONT":1,"ROUTER":0,"STB":0}
+                """, true, true, true);
+        PlanDtos.PlanResponse previous =
+                fixture.service.generate(DATE, new PlanDtos.PlanRequest(60));
+        PlanDtos.RouteDto previousRoute = previous.routes().get(0);
+        PlanDtos.StopDto previousVisit = previousRoute.stops().stream()
+                .filter(stop -> "ORD-20261026-0001".equals(stop.orderId()))
+                .findFirst().orElseThrow();
+
+        OffsetDateTime transferTime = NOW.plusMinutes(1);
+        OffsetDateTime delayTime = transferTime.plusMinutes(1);
+        fixture.day.advanceModelNow(delayTime);
+        DispatchEventEntity transfer = new DispatchEventEntity(
+                DATE, "EVT-FROZEN-TRANSFER", EventType.ORDER_TRANSFERRED, transferTime,
+                "ORD-20261026-0001", null, "ST-002", mapper().createObjectNode());
+        DispatchEventEntity delay = new DispatchEventEntity(
+                DATE, "EVT-FROZEN-DELAY", EventType.VISIT_DELAYED, delayTime,
+                "ORD-20261026-0001", null, null,
+                mapper().createObjectNode().put("delay_min", 45));
+        when(fixture.eventRepository.findAllByDayDateOrderByEventSequenceAsc(DATE))
+                .thenReturn(List.of(transfer, delay));
+
+        PlanDtos.PlanResponse replanned =
+                fixture.service.generate(DATE, new PlanDtos.PlanRequest(60));
+        PlanDtos.RouteDto route = replanned.routes().stream()
+                .filter(candidate -> candidate.staffId().equals(previousRoute.staffId()))
+                .findFirst().orElseThrow();
+        PlanDtos.StopDto preserved = route.stops().stream()
+                .filter(stop -> "ORD-20261026-0001".equals(stop.orderId()))
+                .findFirst().orElseThrow();
+
+        assertEquals(previousVisit, preserved);
+        assertTrue(replanned.routes().stream()
+                .filter(candidate -> "ST-002".equals(candidate.staffId()))
+                .flatMap(candidate -> candidate.stops().stream())
+                .noneMatch(stop -> "ORD-20261026-0001".equals(stop.orderId())));
+    }
+
+    @Test
+    void staffUnavailableEventPreservesFrozenStopsButClosesTheUnstartedSuffix() throws Exception {
+        Fixture fixture = fixture("""
+                {"ONT":1,"ROUTER":0,"STB":0}
+                """, """
+                {"ONT":1,"ROUTER":0,"STB":0}
+                """, true, true);
+        PlanDtos.PlanResponse previous =
+                fixture.service.generate(DATE, new PlanDtos.PlanRequest(60));
+        PlanDtos.RouteDto previousRoute = previous.routes().get(0);
+        PlanDtos.StopDto previousVisit = previousRoute.stops().stream()
+                .filter(stop -> "ORD-20261026-0001".equals(stop.orderId()))
+                .findFirst().orElseThrow();
+
+        OffsetDateTime occurredAt = previousVisit.start().plusMinutes(5);
+        fixture.day.advanceModelNow(occurredAt);
+        DispatchEventEntity unavailable = new DispatchEventEntity(
+                DATE, "EVT-FROZEN-ABSENT", EventType.STAFF_UNAVAILABLE, occurredAt,
+                null, "ST-001", null, mapper().createObjectNode());
+        when(fixture.eventRepository.findAllByDayDateOrderByEventSequenceAsc(DATE))
+                .thenReturn(List.of(unavailable));
+
+        PlanDtos.PlanResponse replanned =
+                fixture.service.generate(DATE, new PlanDtos.PlanRequest(60));
+        PlanDtos.RouteDto route = replanned.routes().stream()
+                .filter(candidate -> candidate.staffId().equals(previousRoute.staffId()))
+                .findFirst().orElseThrow();
+
+        assertEquals("UNAVAILABLE", route.status());
+        assertTrue(route.stops().contains(previousVisit));
+        assertFalse(route.stops().stream()
+                .anyMatch(stop -> "ORD-20261026-0002".equals(stop.orderId())));
+    }
+
     private PlanDtos.PlanResponse planForPgpOrders(int... minuteOffsets) throws Exception {
         ObjectMapper mapper = new ObjectMapper().registerModule(new JavaTimeModule())
                 .disable(DeserializationFeature.ADJUST_DATES_TO_CONTEXT_TIME_ZONE);
@@ -364,8 +639,12 @@ class DispatchPlanServiceTest {
         when(referenceRepository.findById((short) 1)).thenReturn(Optional.of(reference));
         when(matrixRepository.findById((short) 1)).thenReturn(Optional.of(travelMatrix));
 
+        DispatchEventRepository eventRepository = mock(DispatchEventRepository.class);
+        when(eventRepository.findAllByDayDateOrderByEventSequenceAsc(DATE)).thenReturn(List.of());
+        DispatchEventReplayService eventReplayService =
+                new DispatchEventReplayService(eventRepository, mapper);
         DispatchPlanService service = new DispatchPlanService(
-                dayRepository, referenceRepository, matrixRepository, mapper);
+                dayRepository, referenceRepository, matrixRepository, eventReplayService, mapper);
         return service.generate(DATE, new PlanDtos.PlanRequest(60));
     }
 
@@ -385,30 +664,39 @@ class DispatchPlanServiceTest {
 
     private Fixture fixture(String startingEquipment, String capacity, boolean homeCenterOpen,
                             boolean includeSecondOrder) throws Exception {
+        return fixture(startingEquipment, capacity, homeCenterOpen, includeSecondOrder, false);
+    }
+
+    private Fixture fixture(String startingEquipment, String capacity, boolean homeCenterOpen,
+                            boolean includeSecondOrder, boolean includeSecondStaff) throws Exception {
         ObjectMapper mapper = new ObjectMapper().registerModule(new JavaTimeModule())
                 .disable(DeserializationFeature.ADJUST_DATES_TO_CONTEXT_TIME_ZONE);
 
         String homeClose = homeCenterOpen ? "17:00" : "09:45";
+        String staffEntry = """
+                {
+                  "staff_id":"ST-001","service_center_id":"SC-01",
+                  "profiles":["INSTALL"],"technologies":["PON"],"height_permit":false,
+                  "shift":{"start":"08:00","end":"18:00","break_duration_min":30,
+                           "break_window":{"from":"12:00","to":"14:00"}},
+                  "equipment_start":%s,"equipment_capacity":%s
+                }
+                """.formatted(startingEquipment, capacity);
+        String staffEntries = includeSecondStaff
+                ? staffEntry + "," + staffEntry.replace("ST-001", "ST-002")
+                : staffEntry;
         String referenceJson = """
                 {
                   "service_centers": [
                     {"service_center_id":"SC-01","opening_hours":{"open":"08:00","close":"%s"},"restock_duration_min":15},
                     {"service_center_id":"SC-02","opening_hours":{"open":"08:00","close":"09:30"},"restock_duration_min":15}
                   ],
-                  "staff": [
-                    {
-                      "staff_id":"ST-001","service_center_id":"SC-01",
-                      "profiles":["INSTALL"],"technologies":["PON"],"height_permit":false,
-                      "shift":{"start":"08:00","end":"18:00","break_duration_min":30,
-                               "break_window":{"from":"12:00","to":"14:00"}},
-                      "equipment_start":%s,"equipment_capacity":%s
-                    }
-                  ],
+                  "staff": [%s],
                   "work_types":[
                     {"code":"REPAIR","profiles":["INSTALL"],"duration_min":30}
                   ]
                 }
-                """.formatted(homeClose, startingEquipment, capacity);
+                """.formatted(homeClose, staffEntries);
 
         String firstOrder = order("0001", "B-00001",
                 "2026-10-26T09:00:00+05:00", "2026-10-26T09:30:00+05:00",
@@ -441,6 +729,8 @@ class DispatchPlanServiceTest {
         DispatchDaySnapshotRepository dayRepository = mock(DispatchDaySnapshotRepository.class);
         ReferenceSnapshotRepository referenceRepository = mock(ReferenceSnapshotRepository.class);
         TravelMatrixSnapshotRepository matrixRepository = mock(TravelMatrixSnapshotRepository.class);
+        DispatchEventRepository eventRepository = mock(DispatchEventRepository.class);
+        when(eventRepository.findAllByDayDateOrderByEventSequenceAsc(DATE)).thenReturn(List.of());
 
         DispatchDaySnapshotEntity day = new DispatchDaySnapshotEntity(
                 DATE, NOW, mapper.readTree(dayJson), includeSecondOrder ? 2 : 1);
@@ -453,9 +743,11 @@ class DispatchPlanServiceTest {
         when(referenceRepository.findById((short) 1)).thenReturn(Optional.of(reference));
         when(matrixRepository.findById((short) 1)).thenReturn(Optional.of(matrix));
 
+        DispatchEventReplayService eventReplayService =
+                new DispatchEventReplayService(eventRepository, mapper);
         DispatchPlanService service = new DispatchPlanService(
-                dayRepository, referenceRepository, matrixRepository, mapper);
-        return new Fixture(service, dayRepository, day);
+                dayRepository, referenceRepository, matrixRepository, eventReplayService, mapper);
+        return new Fixture(service, dayRepository, eventRepository, day);
     }
 
     private String order(String suffix, String buildingId, String slotStart,
@@ -474,6 +766,11 @@ class DispatchPlanServiceTest {
                 latestStart, deadline);
     }
 
+    private ObjectMapper mapper() {
+        return new ObjectMapper().registerModule(new JavaTimeModule())
+                .disable(DeserializationFeature.ADJUST_DATES_TO_CONTEXT_TIME_ZONE);
+    }
+
     private record Fixture(DispatchPlanService service, DispatchDaySnapshotRepository dayRepository,
-                           DispatchDaySnapshotEntity day) { }
+                           DispatchEventRepository eventRepository, DispatchDaySnapshotEntity day) { }
 }
