@@ -1073,7 +1073,8 @@ public class DispatchPlanService {
     private record PgpDetection(List<PgpGroupDto> groups, Set<String> orderIds,
                                 List<AlertDto> alerts) { }
 
-    private record PgpPartition(int groupedOrderCount, int groupCount,\n                                GroupWindow firstWindow, PgpPartition suffix) { }
+    private record PgpPartition(int groupedOrderCount, int groupCount,
+                                GroupWindow firstWindow, PgpPartition suffix) { }
 
     private static final class GroupWindow {
         private final int startIndex;
