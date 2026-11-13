@@ -49,6 +49,10 @@ class DispatchPlanServiceTest {
         assertFalse(breakStop.start().isAfter(OffsetDateTime.parse("2026-10-26T14:00:00+05:00")));
         assertTrue(java.time.Duration.between(breakStop.start(), breakStop.end()).toMinutes() >= 30);
         assertEquals(0L, breakStop.travelSec());
+        int breakIndex = route.stops().indexOf(breakStop);
+        assertTrue(breakIndex > 0);
+        assertEquals(route.stops().get(breakIndex - 1).locationId(), breakStop.locationId());
+        assertEquals(route.stops().get(breakIndex - 1).end(), breakStop.arrival());
 
         PlanDtos.StopDto restock = route.stops().stream()
                 .filter(stop -> "RESTOCK".equals(stop.type())).findFirst().orElseThrow();

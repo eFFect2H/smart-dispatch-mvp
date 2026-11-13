@@ -1,6 +1,7 @@
 package com.dispatch.smartdispatch.dto.v1;
 
 import com.dispatch.smartdispatch.dto.v1.PlanDtos.*;
+import com.dispatch.smartdispatch.dto.v1.V1Dtos.EquipmentDto;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
@@ -22,7 +23,7 @@ class PlanJsonContractTest {
                 LocalDate.parse("2026-10-26"), 1, now,
                 List.of(new RouteDto("ST-001", "SC-01", "ACTIVE", List.of(
                         new StopDto(1, "DEPOT_START", "SC-01", now, now, now,
-                                null, 0L, 0L, "PLANNED")
+                                null, 0L, 0L, "PLANNED", new EquipmentDto(2, 1, 0))
                 ))),
                 List.of(new UnassignedOrderDto("ORD-20261026-0001", "NO_QUALIFIED_STAFF",
                         "No qualified staff", "REASSIGN")),
@@ -42,5 +43,9 @@ class PlanJsonContractTest {
         assertEquals("ST-001", json.path("routes").get(0).path("staff_id").asText());
         assertEquals("DEPOT_START", json.path("routes").get(0).path("stops").get(0).path("type").asText());
         assertEquals("NO_QUALIFIED_STAFF", json.path("unassigned").get(0).path("reason_code").asText());
+        assertEquals(2, json.path("routes").get(0).path("stops").get(0)
+                .path("equipment_after").path("ONT").asInt());
+        assertEquals(1, json.path("routes").get(0).path("stops").get(0)
+                .path("equipment_after").path("ROUTER").asInt());
     }
 }
