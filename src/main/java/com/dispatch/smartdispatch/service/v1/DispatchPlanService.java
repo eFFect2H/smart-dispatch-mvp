@@ -14,6 +14,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -190,7 +191,10 @@ public class DispatchPlanService {
         validateFrozenPrefixes(response, frozenRoutes);
 
         try {
-            day.updatePlan(response.planVersion(), objectMapper.valueToTree(response), day.getModelNow());
+            ObjectMapper snapshotMapper = objectMapper.copy()
+                    .disable(SerializationFeature.WRITE_DATES_WITH_CONTEXT_TIME_ZONE);
+            JsonNode storedPlan = snapshotMapper.valueToTree(response);
+            day.updatePlan(response.planVersion(), storedPlan, day.getModelNow());
         } catch (IllegalArgumentException ex) {
             throw new IllegalStateException("Could not serialize generated plan", ex);
         }
