@@ -112,7 +112,7 @@ export function comparePlanVersions(
     after: PlanResponse,
     trigger: string,
 ): PlanComparison | null {
-    if (!before || before.date !== after.date || before.plan_version === after.plan_version) return null;
+    if (!before || before.date !== after.date || JSON.stringify(before) === JSON.stringify(after)) return null;
 
     const oldStates = collectOrderStates(before);
     const newStates = collectOrderStates(after);
