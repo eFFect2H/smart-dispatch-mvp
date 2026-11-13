@@ -322,7 +322,7 @@ class DispatchPlanServiceTest {
         TravelMatrixSnapshotEntity travelMatrix = new TravelMatrixSnapshotEntity(
                 "PGP-MATRIX", mapper.readTree(matrixJson), pointIds.size());
 
-        when(dayRepository.findById(DATE)).thenReturn(Optional.of(day));
+        when(dayRepository.findByDateForUpdate(DATE)).thenReturn(Optional.of(day));
         when(referenceRepository.findById((short) 1)).thenReturn(Optional.of(reference));
         when(matrixRepository.findById((short) 1)).thenReturn(Optional.of(travelMatrix));
 
@@ -411,7 +411,7 @@ class DispatchPlanServiceTest {
         TravelMatrixSnapshotEntity matrix = new TravelMatrixSnapshotEntity(
                 "TEST-MATRIX", mapper.readTree(matrixJson), 4);
 
-        when(dayRepository.findById(DATE)).thenReturn(Optional.of(day));
+        when(dayRepository.findByDateForUpdate(DATE)).thenReturn(Optional.of(day));
         when(referenceRepository.findById((short) 1)).thenReturn(Optional.of(reference));
         when(matrixRepository.findById((short) 1)).thenReturn(Optional.of(matrix));
 

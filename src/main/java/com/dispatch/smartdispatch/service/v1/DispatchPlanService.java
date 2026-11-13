@@ -48,7 +48,7 @@ public class DispatchPlanService {
     @Transactional
     public PlanResponse generate(LocalDate date, PlanRequest request) {
         long startedAt = System.nanoTime();
-        DispatchDaySnapshotEntity day = dayRepository.findById(date)
+        DispatchDaySnapshotEntity day = dayRepository.findByDateForUpdate(date)
                 .orElseThrow(() -> V1ApiException.conflict(
                         "DAY_NOT_LOADED", "Upload day input before generating a plan"));
 
