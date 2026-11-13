@@ -1,5 +1,6 @@
 package com.dispatch.smartdispatch.dto.v1;
 
+import com.dispatch.smartdispatch.dto.v1.V1Dtos.EquipmentDto;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.databind.PropertyNamingStrategies;
 import com.fasterxml.jackson.databind.annotation.JsonNaming;
@@ -51,8 +52,16 @@ public final class PlanDtos {
             String orderId,
             Long travelSec,
             Long distanceM,
-            String status
-    ) { }
+            String status,
+            EquipmentDto equipmentAfter
+    ) {
+        public StopDto(int seq, String type, String locationId,
+                       OffsetDateTime arrival, OffsetDateTime start, OffsetDateTime end,
+                       String orderId, Long travelSec, Long distanceM, String status) {
+            this(seq, type, locationId, arrival, start, end, orderId,
+                    travelSec, distanceM, status, null);
+        }
+    }
 
     @JsonNaming(PropertyNamingStrategies.SnakeCaseStrategy.class)
     public record UnassignedOrderDto(
