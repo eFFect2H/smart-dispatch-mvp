@@ -202,6 +202,33 @@ class DispatchPlanServiceTest {
     }
 
     @Test
+    void doesNotInsertASecondBreakAfterTheOriginalBreakHasStarted() throws Exception {
+        Fixture fixture = fixture("""
+                {"ONT":1,"ROUTER":0,"STB":0}
+                """, """
+                {"ONT":1,"ROUTER":0,"STB":0}
+                """, true, true);
+
+        PlanDtos.PlanResponse firstPlan =
+                fixture.service.generate(DATE, new PlanDtos.PlanRequest(60));
+        PlanDtos.RouteDto firstRoute = firstPlan.routes().get(0);
+        PlanDtos.StopDto originalBreak = firstRoute.stops().stream()
+                .filter(stop -> "BREAK".equals(stop.type()))
+                .findFirst().orElseThrow();
+
+        fixture.day.advanceModelNow(originalBreak.end().plusSeconds(1));
+        PlanDtos.PlanResponse secondPlan =
+                fixture.service.generate(DATE, new PlanDtos.PlanRequest(60));
+
+        PlanDtos.RouteDto secondRoute = secondPlan.routes().get(0);
+        assertEquals(1, secondRoute.stops().stream()
+                .filter(stop -> "BREAK".equals(stop.type())).count());
+        assertEquals(originalBreak, secondRoute.stops().stream()
+                .filter(stop -> "BREAK".equals(stop.type()))
+                .findFirst().orElseThrow());
+    }
+
+    @Test
     void preservesEntireRouteOnceReturnLegHasStarted() throws Exception {
         Fixture fixture = fixture("""
                 {"ONT":1,"ROUTER":0,"STB":0}

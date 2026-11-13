@@ -262,8 +262,10 @@ public class DispatchPlanService {
         boolean shiftBlocked = false;
         boolean restockBlocked = false;
 
-        int firstBreakPosition = staff.breakAlreadyTaken ? -1 : 0;
-        int lastBreakPosition = staff.breakAlreadyTaken ? -1 : activities.size();
+        boolean hasAnyVisit = staff.frozenStops.stream().anyMatch(stop -> VISIT.equals(stop.type()))
+                || activities.stream().anyMatch(activity -> VISIT.equals(activity.type));
+        int firstBreakPosition = !hasAnyVisit || staff.breakAlreadyTaken ? -1 : 0;
+        int lastBreakPosition = !hasAnyVisit || staff.breakAlreadyTaken ? -1 : activities.size();
         for (int breakPosition = firstBreakPosition; breakPosition <= lastBreakPosition; breakPosition++) {
             ScheduleAttempt attempt = scheduleAt(staff, activities, breakPosition, centers, matrix);
             slotBlocked |= attempt.failure == Failure.SLOT;
