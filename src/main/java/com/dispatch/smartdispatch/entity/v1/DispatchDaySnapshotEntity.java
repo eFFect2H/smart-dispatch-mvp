@@ -57,6 +57,13 @@ public class DispatchDaySnapshotEntity {
     }
 
     public LocalDate getDayDate() { return dayDate; }
+    public void advanceModelNow(OffsetDateTime nextModelNow) {
+        if (nextModelNow.isBefore(modelNow)) {
+            throw new IllegalArgumentException("Model time cannot move backwards");
+        }
+        this.modelNow = nextModelNow;
+    }
+
     public OffsetDateTime getModelNow() { return modelNow; }
     public JsonNode getPayload() { return payload; }
     public int getOrderCount() { return orderCount; }

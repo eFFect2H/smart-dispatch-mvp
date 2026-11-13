@@ -5,6 +5,7 @@ import com.dispatch.smartdispatch.entity.v1.DispatchDaySnapshotEntity;
 import com.dispatch.smartdispatch.entity.v1.ReferenceSnapshotEntity;
 import com.dispatch.smartdispatch.exception.v1.V1ApiException;
 import com.dispatch.smartdispatch.repository.v1.DispatchDaySnapshotRepository;
+import com.dispatch.smartdispatch.repository.v1.DispatchEventRepository;
 import com.dispatch.smartdispatch.repository.v1.ReferenceSnapshotRepository;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -20,13 +21,16 @@ import java.util.stream.Collectors;
 public class DayInputService {
     private final DispatchDaySnapshotRepository dayRepository;
     private final ReferenceSnapshotRepository referenceRepository;
+    private final DispatchEventRepository eventRepository;
     private final ObjectMapper objectMapper;
 
     public DayInputService(DispatchDaySnapshotRepository dayRepository,
                            ReferenceSnapshotRepository referenceRepository,
+                           DispatchEventRepository eventRepository,
                            ObjectMapper objectMapper) {
         this.dayRepository = dayRepository;
         this.referenceRepository = referenceRepository;
+        this.eventRepository = eventRepository;
         this.objectMapper = objectMapper;
     }
 
@@ -41,6 +45,7 @@ public class DayInputService {
                         "REFERENCE_NOT_LOADED", "Upload reference data before uploading a day"));
 
         validateOrders(pathDate, request, reference);
+        eventRepository.deleteByDayDate(pathDate);
         JsonNode payload = objectMapper.valueToTree(request);
         dayRepository.save(new DispatchDaySnapshotEntity(
                 pathDate, request.now(), payload, request.orders().size()));
