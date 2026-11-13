@@ -125,6 +125,19 @@ class DispatchEventServiceTest {
     }
 
     @Test
+    void rejectsEventWhoseTimestampBelongsToAnotherDate() {
+        EventRequest request = new EventRequest(
+                "EVT-DATE", EventType.ORDER_CANCELLED,
+                OffsetDateTime.parse("2026-10-27T00:15:00+05:00"),
+                "ORD-20261026-0001", null, null, mapper.createObjectNode());
+
+        V1ApiException exception = assertThrows(
+                V1ApiException.class, () -> service.append(DATE, request));
+
+        assertEquals("EVENT_DATE_MISMATCH", exception.getCode());
+    }
+
+    @Test
     void rejectsEventThatMovesModelTimeBackwards() {
         day.advanceModelNow(NOW.plusMinutes(10));
         EventRequest request = new EventRequest(

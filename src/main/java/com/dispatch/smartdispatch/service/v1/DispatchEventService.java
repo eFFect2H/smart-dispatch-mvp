@@ -48,6 +48,11 @@ public class DispatchEventService {
                 .orElseThrow(() -> V1ApiException.conflict(
                         "DAY_NOT_LOADED", "Upload day input before appending events"));
 
+        if (!request.occurredAt().toLocalDate().equals(date)) {
+            throw V1ApiException.unprocessable(
+                    "EVENT_DATE_MISMATCH", "occurred_at must fall on the date in the request path");
+        }
+
         JsonNode payload = normalizePayload(request.payload());
         Optional<DispatchEventEntity> existing = eventRepository
                 .findByDayDateAndEventId(date, request.eventId());
@@ -60,10 +65,6 @@ public class DispatchEventService {
                     "ALREADY_RECORDED", request.eventId(), true, day.getModelNow());
         }
 
-        if (!request.occurredAt().toLocalDate().equals(date)) {
-            throw V1ApiException.unprocessable(
-                    "EVENT_DATE_MISMATCH", "occurred_at must fall on the date in the request path");
-        }
         if (request.occurredAt().isBefore(day.getModelNow())) {
             throw V1ApiException.unprocessable(
                     "EVENT_TIME_REGRESSION", "occurred_at cannot be earlier than the current model time");
