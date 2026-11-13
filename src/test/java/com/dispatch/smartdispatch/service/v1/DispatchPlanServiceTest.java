@@ -164,6 +164,70 @@ class DispatchPlanServiceTest {
         assertEquals(2, plan.alerts().size());
     }
 
+    @Test
+    void preservesStartedVisitAndReplansOnlyTheUnstartedSuffix() throws Exception {
+        Fixture fixture = fixture("""
+                {"ONT":1,"ROUTER":0,"STB":0}
+                """, """
+                {"ONT":1,"ROUTER":0,"STB":0}
+                """, true, true);
+
+        PlanDtos.PlanResponse firstPlan =
+                fixture.service.generate(DATE, new PlanDtos.PlanRequest(60));
+        PlanDtos.RouteDto firstRoute = firstPlan.routes().get(0);
+        PlanDtos.StopDto firstVisit = firstRoute.stops().stream()
+                .filter(stop -> "ORD-20261026-0001".equals(stop.orderId()))
+                .findFirst().orElseThrow();
+        assertEquals("VISIT", firstVisit.type());
+
+        fixture.day.advanceModelNow(firstVisit.start().plusMinutes(5));
+        PlanDtos.PlanResponse secondPlan =
+                fixture.service.generate(DATE, new PlanDtos.PlanRequest(60));
+
+        PlanDtos.RouteDto secondRoute = secondPlan.routes().stream()
+                .filter(route -> route.staffId().equals(firstRoute.staffId()))
+                .findFirst().orElseThrow();
+        PlanDtos.StopDto preservedVisit = secondRoute.stops().stream()
+                .filter(stop -> "ORD-20261026-0001".equals(stop.orderId()))
+                .findFirst().orElseThrow();
+
+        assertEquals(firstVisit, preservedVisit,
+                "H10 must preserve the started visit's staff, location and timestamps");
+        assertEquals(firstPlan.planVersion() + 1, secondPlan.planVersion());
+        assertTrue(secondRoute.stops().stream()
+                .anyMatch(stop -> "ORD-20261026-0002".equals(stop.orderId())),
+                "The not-yet-started visit should remain eligible for replanning");
+        assertEquals(2, secondRoute.stops().stream()
+                .filter(stop -> "VISIT".equals(stop.type())).count());
+    }
+
+    @Test
+    void preservesEntireRouteOnceReturnLegHasStarted() throws Exception {
+        Fixture fixture = fixture("""
+                {"ONT":1,"ROUTER":0,"STB":0}
+                """, """
+                {"ONT":1,"ROUTER":0,"STB":0}
+                """, true, true);
+
+        PlanDtos.PlanResponse firstPlan =
+                fixture.service.generate(DATE, new PlanDtos.PlanRequest(60));
+        PlanDtos.RouteDto firstRoute = firstPlan.routes().get(0);
+        PlanDtos.StopDto depotEnd = firstRoute.stops().get(firstRoute.stops().size() - 1);
+
+        fixture.day.advanceModelNow(depotEnd.end().plusSeconds(1));
+        PlanDtos.PlanResponse secondPlan =
+                fixture.service.generate(DATE, new PlanDtos.PlanRequest(60));
+
+        PlanDtos.RouteDto secondRoute = secondPlan.routes().stream()
+                .filter(route -> route.staffId().equals(firstRoute.staffId()))
+                .findFirst().orElseThrow();
+
+        assertEquals(firstRoute.stops(), secondRoute.stops(),
+                "No work may be appended after the previous plan's return leg has started");
+        assertEquals(firstRoute.totals(), secondRoute.totals());
+        assertEquals(firstPlan.planVersion() + 1, secondPlan.planVersion());
+    }
+
     private PlanDtos.PlanResponse planForPgpOrders(int... minuteOffsets) throws Exception {
         ObjectMapper mapper = new ObjectMapper().registerModule(new JavaTimeModule())
                 .disable(DeserializationFeature.ADJUST_DATES_TO_CONTEXT_TIME_ZONE);
@@ -323,7 +387,7 @@ class DispatchPlanServiceTest {
 
         DispatchPlanService service = new DispatchPlanService(
                 dayRepository, referenceRepository, matrixRepository, mapper);
-        return new Fixture(service, dayRepository);
+        return new Fixture(service, dayRepository, day);
     }
 
     private String order(String suffix, String buildingId, String slotStart,
@@ -342,5 +406,6 @@ class DispatchPlanServiceTest {
                 latestStart, deadline);
     }
 
-    private record Fixture(DispatchPlanService service, DispatchDaySnapshotRepository dayRepository) { }
+    private record Fixture(DispatchPlanService service, DispatchDaySnapshotRepository dayRepository,
+                           DispatchDaySnapshotEntity day) { }
 }
