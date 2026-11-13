@@ -148,6 +148,7 @@ export default function SelectedOrderDetails({
 
             {order && orderState && (
                 <DispatchActionPanel
+                    key={orderId}
                     state={orderState}
                     currentStaffId={assignedRoute?.staff_id}
                     targetStaff={transferStaff}
