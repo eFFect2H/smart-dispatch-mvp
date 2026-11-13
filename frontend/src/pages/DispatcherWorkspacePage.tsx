@@ -245,6 +245,7 @@ export default function DispatcherWorkspacePage() {
     const [plan, setPlan] = useState<PlanResponse | null>(null);
     const [planComparison, setPlanComparison] = useState<PlanComparison | null>(null);
     const [eventHistory, setEventHistory] = useState<EventHistory | null>(null);
+    const [pendingReplayOverride, setPendingReplayOverride] = useState(false);
     const [absentStaffInput, setAbsentStaffInput] = useState("");
     const [eventType, setEventType] = useState<EventType>("VISIT_DELAYED");
     const [eventOrderId, setEventOrderId] = useState("");
@@ -277,8 +278,8 @@ export default function DispatcherWorkspacePage() {
         mapRoutes.flatMap(({ points }) => points.map((point) => [point.lat, point.lon] as [number, number])), [mapRoutes]);
     const activeAlerts = (plan?.alerts ?? []).filter((alert: PlanAlert) =>
         alert.status === "ACTIVE" && alert.type === "LATE_RISK");
-    const hasPendingReplay = Boolean(plan && eventHistory &&
-        Date.parse(eventHistory.model_now) > Date.parse(plan.as_of));
+    const hasPendingReplay = Boolean(pendingReplayOverride || (plan && eventHistory &&
+        Date.parse(eventHistory.model_now) > Date.parse(plan.as_of)));
     const staffOptions = reference?.staff ?? (plan?.routes ?? []).map((route) => ({
         staff_id: route.staff_id,
         display_name: route.staff_id,
@@ -312,6 +313,7 @@ export default function DispatcherWorkspacePage() {
             // The backend resets loaded day snapshots as soon as reference data is replaced.
             setReference(nextReference);
             setPlan(null); setEventHistory(null); setPlanComparison(null); setSelectedOrderId(null); setAllOrders([]);
+            setPendingReplayOverride(false);
             await uploadTravelMatrix(nextMatrix);
             setNotice("Справочники и матрица загружены: " + nextReference.staff.length + " сотрудников, " +
                 nextReference.service_centers.length + " СЦ, " + nextReference.access_nodes.length +
@@ -334,9 +336,11 @@ export default function DispatcherWorkspacePage() {
             };
             const previousPlan = plan?.date === date ? plan : null;
             await uploadDay(date, dayInput);
+            setPendingReplayOverride(false);
             await generatePlan(date);
             const [latestPlan, history] = await Promise.all([getPlan(date), getEventHistory(date)]);
             setAllOrders(orders); setPlan(latestPlan); setEventHistory(history); setEventNow(modelNow);
+            setPendingReplayOverride(false);
             setPlanComparison(comparePlanVersions(previousPlan, latestPlan, "Перестроение исходного дня"));
             setSelectedOrderId(null);
             setNotice("План v" + latestPlan.plan_version + " построен. В день загружено " + selectedOrders.length + " нарядов.");
@@ -417,11 +421,13 @@ export default function DispatcherWorkspacePage() {
             setEventHistory(history);
             setModelNow(history.model_now);
             setEventNow(history.model_now);
+            setPendingReplayOverride(false);
             setPlanComparison(comparePlanVersions(previousPlan, latestPlan, actionLabel));
             setNotice("Событие принято. План пересчитан до версии v" + latestPlan.plan_version + ".");
             return true;
         } catch (cause) {
             if (recorded) {
+                setPendingReplayOverride(true);
                 try {
                     const history = await getEventHistory(date);
                     setEventHistory(history);
@@ -452,6 +458,7 @@ export default function DispatcherWorkspacePage() {
             setEventHistory(history);
             setModelNow(history.model_now);
             setEventNow(history.model_now);
+            setPendingReplayOverride(false);
             setPlanComparison(comparePlanVersions(previousPlan, latestPlan, "Применение ожидающих событий"));
             setNotice("Ожидающие события применены. Текущая версия плана: v" + latestPlan.plan_version + ".");
         } catch (cause) {
@@ -550,6 +557,7 @@ export default function DispatcherWorkspacePage() {
                             const value = event.target.value; setDate(value);
                             setModelNow(value + modelNow.slice(10)); setEventNow(value + eventNow.slice(10));
                             setPlan(null); setEventHistory(null); setPlanComparison(null); setSelectedOrderId(null);
+                            setPendingReplayOverride(false);
                         }} /></label>
                     <button className="secondary-button" type="button" onClick={() => void handleRefresh()} disabled={refreshing}>
                         <RefreshCw size={15} className={refreshing ? "v1-spin" : ""} /> Обновить
