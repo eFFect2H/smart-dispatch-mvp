@@ -53,7 +53,9 @@ public class DayInputService {
 
     private void validateOrders(LocalDate date, DayInputRequest input, JsonNode reference) {
         Set<String> staffIds = stream(reference.path("staff"))
-                .map(x -> x.path("staff_id").asText()).collect(Collectors.toSet());
+                .stream()
+                .map(x -> x.path("staff_id").asText())
+                .collect(Collectors.toSet());
 
         Map<String, WorkTypeDtoView> workTypes = new HashMap<>();
         reference.path("work_types").forEach(x -> workTypes.put(
