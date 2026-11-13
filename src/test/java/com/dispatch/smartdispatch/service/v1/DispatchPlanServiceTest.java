@@ -202,7 +202,7 @@ class DispatchPlanServiceTest {
     }
 
     @Test
-    void doesNotInsertASecondBreakAfterTheOriginalBreakHasStarted() throws Exception {
+    void doesNotInsertASecondBreakWhileTheOriginalBreakIsInProgress() throws Exception {
         Fixture fixture = fixture("""
                 {"ONT":1,"ROUTER":0,"STB":0}
                 """, """
@@ -216,7 +216,7 @@ class DispatchPlanServiceTest {
                 .filter(stop -> "BREAK".equals(stop.type()))
                 .findFirst().orElseThrow();
 
-        fixture.day.advanceModelNow(originalBreak.end().plusSeconds(1));
+        fixture.day.advanceModelNow(originalBreak.start().plusSeconds(1));
         PlanDtos.PlanResponse secondPlan =
                 fixture.service.generate(DATE, new PlanDtos.PlanRequest(60));
 
