@@ -174,6 +174,9 @@ class DispatchPlanServiceTest {
 
         PlanDtos.PlanResponse firstPlan =
                 fixture.service.generate(DATE, new PlanDtos.PlanRequest(60));
+        assertTrue(fixture.day.getPlanPayload().path("routes").get(0)
+                        .path("stops").get(0).path("arrival").asText().endsWith("+05:00"),
+                "The persisted plan snapshot must retain the original OffsetDateTime offset");
         PlanDtos.RouteDto firstRoute = firstPlan.routes().get(0);
         PlanDtos.StopDto firstVisit = firstRoute.stops().stream()
                 .filter(stop -> "ORD-20261026-0001".equals(stop.orderId()))
