@@ -3,3 +3,8 @@
 *.iml
 .env
 .DS_Store
+
+# Local simulator artifacts and Python cache
+__pycache__/
+artifacts/
+organizer-data/
