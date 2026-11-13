@@ -401,8 +401,8 @@ export default function DispatcherWorkspacePage() {
     return (
         <div className="v1-workspace">
             <div className="v1-page-heading">
-                <div><div className="eyebrow">STAGE E · API V1</div><h1>Рабочее место диспетчера</h1>
-                    <p>Маршруты сотрудников, загрузка смены, события и контроль рисков.</p></div>
+                <div><div className="eyebrow">STAGE E2 · API V1</div><h1>Рабочее место диспетчера</h1>
+                    <p>Маршруты, анализ изменений плана, объяснение назначений и контроль рисков.</p></div>
                 <div className="v1-heading-actions">
                     <label className="v1-date-control"><CalendarDays size={16} />
                         <input type="date" value={date} onChange={(event) => {
