@@ -296,10 +296,10 @@ export default function DispatcherWorkspacePage() {
             const nextMatrix = typeof matrixRaw === "object" && matrixRaw !== null && "travel_matrix" in matrixRaw
                 ? (matrixRaw as { travel_matrix: TravelMatrix }).travel_matrix : matrixRaw as TravelMatrix;
             await uploadReference(nextReference);
-            await uploadTravelMatrix(nextMatrix);
+            // The backend resets loaded day snapshots as soon as reference data is replaced.
             setReference(nextReference);
-            // Replacing reference data resets the backend's loaded day snapshots.
             setPlan(null); setEventHistory(null); setPlanComparison(null); setSelectedOrderId(null); setAllOrders([]);
+            await uploadTravelMatrix(nextMatrix);
             setNotice("Справочники и матрица загружены: " + nextReference.staff.length + " сотрудников, " +
                 nextReference.service_centers.length + " СЦ, " + nextReference.access_nodes.length +
                 " узлов. Состояние дней сброшено — загрузи день заново.");
