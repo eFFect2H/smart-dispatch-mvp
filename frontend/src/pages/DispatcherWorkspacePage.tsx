@@ -2,7 +2,7 @@ import { Fragment, useEffect, useMemo, useState } from "react";
 import type { ChangeEvent, CSSProperties } from "react";
 import {
     Activity, AlertTriangle, CalendarDays, CheckCircle2, Clock3, Filter,
-    Layers3, MapPinned, Play, RefreshCw, Route, Send, Upload, XCircle,
+    Layers3, MapPinned, Play, RefreshCw, Route, Send, Upload, UserX, XCircle,
 } from "lucide-react";
 import { CircleMarker, MapContainer, Polyline, Popup, TileLayer, useMap } from "react-leaflet";
 import "leaflet/dist/leaflet.css";
@@ -182,6 +182,7 @@ function StaffLabel({ staffId, staff }: { staffId: string; staff?: StaffMember }
 function GanttRow(props: {
     route: PlanRoute; staff?: StaffMember; selectedOrderId: string | null;
     onSelectOrder: (id: string | null) => void; color: string;
+    onMarkUnavailable: (staffId: string) => void; busy: boolean;
 }) {
     const staffStart = minuteOfDay(props.staff?.shift.start) ?? TIME_START;
     const staffEnd = minuteOfDay(props.staff?.shift.end) ?? TIME_END;
@@ -194,6 +195,16 @@ function GanttRow(props: {
             <div className="v1-gantt-person">
                 <span className="v1-gantt-avatar">{(props.staff?.display_name || props.route.staff_id).slice(0, 1)}</span>
                 <span><strong><StaffLabel staffId={props.route.staff_id} staff={props.staff} /></strong><small>{props.route.staff_id}</small></span>
+                <button
+                    type="button"
+                    className="v1-staff-unavailable-button"
+                    title={props.route.status === "UNAVAILABLE" ? "Сотрудник уже отмечен как недоступный" : "Отметить сотрудника недоступным до конца дня"}
+                    aria-label={"Отметить " + props.route.staff_id + " недоступным"}
+                    disabled={props.busy || props.route.status === "UNAVAILABLE"}
+                    onClick={() => props.onMarkUnavailable(props.route.staff_id)}
+                >
+                    <UserX size={13} />
+                </button>
             </div>
             <div className="v1-gantt-track">
                 <div className="v1-gantt-shift" style={shiftStyle} />
@@ -266,6 +277,8 @@ export default function DispatcherWorkspacePage() {
         mapRoutes.flatMap(({ points }) => points.map((point) => [point.lat, point.lon] as [number, number])), [mapRoutes]);
     const activeAlerts = (plan?.alerts ?? []).filter((alert: PlanAlert) =>
         alert.status === "ACTIVE" && alert.type === "LATE_RISK");
+    const hasPendingReplay = Boolean(plan && eventHistory &&
+        Date.parse(eventHistory.model_now) > Date.parse(plan.as_of));
     const staffOptions = reference?.staff ?? (plan?.routes ?? []).map((route) => ({
         staff_id: route.staff_id,
         display_name: route.staff_id,
@@ -345,11 +358,147 @@ export default function DispatcherWorkspacePage() {
         finally { setRefreshing(false); }
     }
 
+    function validateEventTimestamp(): boolean {
+        if (!plan) {
+            setError("Сначала построй план дня.");
+            return false;
+        }
+        if (!eventNow.startsWith(date + "T") || !/[+-]\d{2}:\d{2}$/.test(eventNow) ||
+            !Number.isFinite(Date.parse(eventNow))) {
+            setError("Время события должно относиться к " + date + " и содержать корректный UTC offset.");
+            return false;
+        }
+        const minimumModelTime = Math.max(
+            Date.parse(plan.as_of),
+            Date.parse(eventHistory?.model_now ?? plan.as_of),
+        );
+        if (Date.parse(eventNow) < minimumModelTime) {
+            setError("Время события не может быть раньше текущего модельного времени: " +
+                (eventHistory?.model_now ?? plan.as_of) + ".");
+            return false;
+        }
+        return true;
+    }
+
+    function createDispatchEvent(
+        eventType: EventType,
+        fields: {
+            orderId?: string;
+            staffId?: string;
+            targetStaffId?: string;
+            payload?: Record<string, unknown>;
+        } = {},
+    ): EventRequest {
+        return {
+            event_id: "EVT-" + crypto.randomUUID(),
+            event_type: eventType,
+            occurred_at: eventNow,
+            ...(fields.orderId ? { order_id: fields.orderId } : {}),
+            ...(fields.staffId ? { staff_id: fields.staffId } : {}),
+            ...(fields.targetStaffId ? { target_staff_id: fields.targetStaffId } : {}),
+            payload: fields.payload ?? {},
+        };
+    }
+
+    async function submitDispatchEvent(event: EventRequest, actionLabel: string): Promise<boolean> {
+        if (hasPendingReplay) {
+            setError("Сначала примени ранее принятые события через «Повторить перепланирование».");
+            return false;
+        }
+        const previousPlan = plan;
+        let recorded = false;
+        setSending(true); setError(null); setNotice(null);
+        try {
+            await appendEvent(date, event);
+            recorded = true;
+            await generatePlan(date);
+            const [latestPlan, history] = await Promise.all([getPlan(date), getEventHistory(date)]);
+            setPlan(latestPlan);
+            setEventHistory(history);
+            setModelNow(history.model_now);
+            setEventNow(history.model_now);
+            setPlanComparison(comparePlanVersions(previousPlan, latestPlan, actionLabel));
+            setNotice("Событие принято. План пересчитан до версии v" + latestPlan.plan_version + ".");
+            return true;
+        } catch (cause) {
+            if (recorded) {
+                try {
+                    const history = await getEventHistory(date);
+                    setEventHistory(history);
+                    setModelNow(history.model_now);
+                    setEventNow(history.model_now);
+                } catch {
+                    // Keep the last known event history; the dispatcher can refresh it manually.
+                }
+                setError("Событие уже записано в журнал, но план не удалось полностью обновить. " +
+                    "Используй «Повторить перепланирование» или «Обновить». Причина: " + getErrorMessage(cause));
+            } else {
+                setError(getErrorMessage(cause));
+            }
+            return recorded;
+        } finally {
+            setSending(false);
+        }
+    }
+
+    async function handleReplanPendingEvents() {
+        if (!plan || !hasPendingReplay) return;
+        const previousPlan = plan;
+        setSending(true); setError(null); setNotice(null);
+        try {
+            await generatePlan(date);
+            const [latestPlan, history] = await Promise.all([getPlan(date), getEventHistory(date)]);
+            setPlan(latestPlan);
+            setEventHistory(history);
+            setModelNow(history.model_now);
+            setEventNow(history.model_now);
+            setPlanComparison(comparePlanVersions(previousPlan, latestPlan, "Применение ожидающих событий"));
+            setNotice("Ожидающие события применены. Текущая версия плана: v" + latestPlan.plan_version + ".");
+        } catch (cause) {
+            setError("Не удалось применить ожидающие события: " + getErrorMessage(cause));
+        } finally {
+            setSending(false);
+        }
+    }
+
+    async function handleTransferOrder(orderId: string, targetStaffId: string) {
+        if (!validateEventTimestamp()) return;
+        await submitDispatchEvent(
+            createDispatchEvent("ORDER_TRANSFERRED", { orderId, targetStaffId }),
+            "Ручное переназначение " + orderId,
+        );
+    }
+
+    async function handleDelayOrder(orderId: string, delayMin: number) {
+        if (!validateEventTimestamp()) return;
+        if (!Number.isInteger(delayMin) || delayMin <= 0) {
+            setError("Задержка должна быть положительным целым числом.");
+            return;
+        }
+        await submitDispatchEvent(
+            createDispatchEvent("VISIT_DELAYED", { orderId, payload: { delay_min: delayMin } }),
+            "Задержка визита " + orderId,
+        );
+    }
+
+    async function handleCancelOrder(orderId: string) {
+        if (!validateEventTimestamp()) return;
+        await submitDispatchEvent(
+            createDispatchEvent("ORDER_CANCELLED", { orderId }),
+            "Отмена наряда " + orderId,
+        );
+    }
+
+    async function handleStaffUnavailable(staffId: string) {
+        if (!validateEventTimestamp()) return;
+        await submitDispatchEvent(
+            createDispatchEvent("STAFF_UNAVAILABLE", { staffId }),
+            "Сотрудник недоступен: " + staffId,
+        );
+    }
+
     async function handleSendEvent() {
         if (!plan) { setError("Сначала построй план дня."); return; }
-        if (!eventNow.startsWith(date + "T") || !/[+-]\d{2}:\d{2}$/.test(eventNow)) {
-            setError("Время события должно относиться к " + date + " и содержать UTC offset."); return;
-        }
         const needsOrder = ["NEW_ORDER", "ORDER_CANCELLED", "VISIT_DELAYED", "ORDER_TRANSFERRED"].includes(eventType);
         if (needsOrder && !eventOrderId.trim()) { setError("Для выбранного события требуется order_id."); return; }
         if (eventType === "STAFF_UNAVAILABLE" && !eventStaffId.trim()) { setError("Для STAFF_UNAVAILABLE требуется staff_id."); return; }
@@ -369,34 +518,23 @@ export default function DispatcherWorkspacePage() {
                 setError("Проверь JSON нового наряда: " + (cause instanceof Error ? cause.message : "ошибка формата")); return;
             }
         }
-        const event: EventRequest = {
-            event_id: "EVT-" + crypto.randomUUID(),
-            event_type: eventType,
-            occurred_at: eventNow,
-            ...(needsOrder ? { order_id: eventOrderId.trim() } : {}),
-            ...(eventType === "STAFF_UNAVAILABLE" ? { staff_id: eventStaffId.trim() } : {}),
-            ...(eventType === "ORDER_TRANSFERRED" ? { target_staff_id: targetStaffId.trim() } : {}),
+        if (!validateEventTimestamp()) return;
+
+        const event = createDispatchEvent(eventType, {
+            ...(needsOrder ? { orderId: eventOrderId.trim() } : {}),
+            ...(eventType === "STAFF_UNAVAILABLE" ? { staffId: eventStaffId.trim() } : {}),
+            ...(eventType === "ORDER_TRANSFERRED" ? { targetStaffId: targetStaffId.trim() } : {}),
             payload,
-        };
-        const previousPlan = plan;
-        setSending(true); setError(null); setNotice(null);
-        try {
-            await appendEvent(date, event);
-            // The current backend applies event replay during POST /plan, not during GET /plan.
-            await generatePlan(date);
-            const [latestPlan, history] = await Promise.all([getPlan(date), getEventHistory(date)]);
-            setPlan(latestPlan); setEventHistory(history); setModelNow(eventNow);
-            setPlanComparison(comparePlanVersions(previousPlan, latestPlan, EVENT_LABELS[eventType]));
-            if (eventType === "NEW_ORDER" && typeof payload.order === "object" && payload.order !== null &&
-                "order_id" in payload.order && typeof payload.order.order_id === "string") {
-                const newOrder = payload.order as Order;
-                setAllOrders(current => current.some(item => item.order_id === newOrder.order_id)
-                    ? current : [...current, newOrder]);
-                setSelectedOrderId(newOrder.order_id);
-            }
-            setNotice("Событие принято. План пересчитан до версии v" + latestPlan.plan_version + ".");
-        } catch (cause) { setError(getErrorMessage(cause)); }
-        finally { setSending(false); }
+        });
+        const recorded = await submitDispatchEvent(event, EVENT_LABELS[eventType]);
+        if (recorded && eventType === "NEW_ORDER" && typeof payload.order === "object" &&
+            payload.order !== null && "order_id" in payload.order &&
+            typeof payload.order.order_id === "string") {
+            const newOrder = payload.order as Order;
+            setAllOrders(current => current.some(item => item.order_id === newOrder.order_id)
+                ? current : [...current, newOrder]);
+            setSelectedOrderId(newOrder.order_id);
+        }
     }
 
     const totalOrders = plan?.summary?.orders_total ?? allOrders.filter((order) => offsetDate(order.slot.start) === date).length;
@@ -404,8 +542,8 @@ export default function DispatcherWorkspacePage() {
     return (
         <div className="v1-workspace">
             <div className="v1-page-heading">
-                <div><div className="eyebrow">STAGE E2 · API V1</div><h1>Рабочее место диспетчера</h1>
-                    <p>Маршруты, анализ изменений плана, объяснение назначений и контроль рисков.</p></div>
+                <div><div className="eyebrow">STAGE E3 · API V1</div><h1>Рабочее место диспетчера</h1>
+                    <p>Маршруты, объяснение назначений и оперативное управление нарядами и бригадами.</p></div>
                 <div className="v1-heading-actions">
                     <label className="v1-date-control"><CalendarDays size={16} />
                         <input type="date" value={date} onChange={(event) => {
@@ -421,6 +559,13 @@ export default function DispatcherWorkspacePage() {
 
             {error && <div className="error-banner" role="alert"><span>{error}</span><button type="button" onClick={() => setError(null)}>Закрыть</button></div>}
             {notice && <div className="v1-notice" role="status"><CheckCircle2 size={16} /><span>{notice}</span><button type="button" onClick={() => setNotice(null)}><XCircle size={15} /></button></div>}
+            {plan && hasPendingReplay && <div className="v1-pending-replay" role="alert">
+                <div><strong>Есть события, ещё не применённые к плану</strong>
+                    <span>Модельное время журнала: {formatDateTime(eventHistory?.model_now)} · версия плана рассчитана на {formatDateTime(plan.as_of)}.</span></div>
+                <button className="primary-button" type="button" disabled={sending} onClick={() => void handleReplanPendingEvents()}>
+                    <RefreshCw size={14} /> Повторить перепланирование
+                </button>
+            </div>}
 
             <details className="v1-setup-panel" open={!plan}>
                 <summary><span><Upload size={17} /> Загрузка исходных данных</span><small>JSON / CSV · API организатора v1</small></summary>
@@ -503,6 +648,8 @@ export default function DispatcherWorkspacePage() {
                             {filteredRoutes.map((route, index) => <GanttRow key={route.staff_id} route={route}
                                 staff={reference?.staff.find((member) => member.staff_id === route.staff_id)}
                                 selectedOrderId={selectedOrderId} onSelectOrder={setSelectedOrderId}
+                                onMarkUnavailable={(staffId) => void handleStaffUnavailable(staffId)}
+                                busy={sending || hasPendingReplay}
                                 color={ROUTE_COLORS[index % ROUTE_COLORS.length]} />)}
                             {!filteredRoutes.length && <div className="v1-empty-inline">Нет маршрутов для выбранного фильтра.</div>}
                         </div>
@@ -515,6 +662,11 @@ export default function DispatcherWorkspacePage() {
                     order={allOrders.find(order => order.order_id === selectedOrderId) ?? null}
                     plan={plan}
                     reference={reference}
+                    modelNow={eventHistory?.model_now ?? plan.as_of}
+                    actionsDisabled={sending || hasPendingReplay}
+                    onTransferOrder={(targetStaffId) => void handleTransferOrder(selectedOrderId, targetStaffId)}
+                    onDelayOrder={(delayMin) => void handleDelayOrder(selectedOrderId, delayMin)}
+                    onCancelOrder={() => void handleCancelOrder(selectedOrderId)}
                     onClose={() => setSelectedOrderId(null)}
                 />}
 
