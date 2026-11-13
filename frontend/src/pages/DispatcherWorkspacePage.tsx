@@ -63,8 +63,12 @@ function readFile(file: File): Promise<string> {
     });
 }
 async function readJson(file: File): Promise<unknown> {
-    try { return JSON.parse(await readFile(file)) as unknown; }
-    catch (error) { throw new Error(file.name + ": некорректный JSON (" + (error instanceof Error ? error.message : "parse error") + ")"); }
+    try {
+        return JSON.parse(await readFile(file)) as unknown;
+    } catch (error) {
+        const message = error instanceof Error ? error.message : "parse error";
+        throw new Error(file.name + ": некорректный JSON (" + message + ")", { cause: error });
+    }
 }
 function unwrapArray<T>(value: unknown, key: string, fileName: string): T[] {
     const candidate = Array.isArray(value) ? value :
@@ -212,7 +216,7 @@ function GanttRow(props: {
 }
 
 export default function DispatcherWorkspacePage() {
-    const today = useMemo(localToday, []);
+    const today = localToday();
     const [date, setDate] = useState(today);
     const [modelNow, setModelNow] = useState(today + "T08:00:00+05:00");
     const [serviceCentersFile, setServiceCentersFile] = useState<File | null>(null);
@@ -373,7 +377,6 @@ export default function DispatcherWorkspacePage() {
     }
 
     const totalOrders = plan?.summary?.orders_total ?? allOrders.filter((order) => offsetDate(order.slot.start) === date).length;
-    const timelineTicks = [8, 10, 12, 14, 16, 18, 20, 22];
 
     return (
         <div className="v1-workspace">
