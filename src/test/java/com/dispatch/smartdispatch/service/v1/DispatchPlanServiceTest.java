@@ -86,7 +86,11 @@ class DispatchPlanServiceTest {
 
         assertEquals(1, plan.unassigned().size());
         assertEquals("NO_EQUIPMENT", plan.unassigned().get(0).reasonCode());
-        assertTrue(plan.routes().isEmpty());
+        assertEquals(1, plan.routes().size());
+        assertTrue(plan.routes().get(0).stops().isEmpty());
+        assertEquals(1, plan.summary().ordersTotal());
+        assertEquals(0, plan.summary().visitsPlanned());
+        assertEquals(1, plan.summary().unassigned());
     }
 
     @Test
@@ -103,6 +107,88 @@ class DispatchPlanServiceTest {
         assertEquals(1, plan.routes().size());
         assertTrue(plan.routes().get(0).stops().stream()
                 .noneMatch(stop -> "RESTOCK".equals(stop.type())));
+    }
+
+
+
+    @Test
+    void groupsThreePgpRelevantOrdersAndReportsPlanQuality() throws Exception {
+        ObjectMapper mapper = new ObjectMapper().registerModule(new JavaTimeModule())
+                .disable(DeserializationFeature.ADJUST_DATES_TO_CONTEXT_TIME_ZONE);
+        String referenceJson = """
+                {
+                  "service_centers": [
+                    {"service_center_id":"SC-01","opening_hours":{"open":"08:00","close":"18:00"},"restock_duration_min":15}
+                  ],
+                  "staff": [
+                    {
+                      "staff_id":"ST-001","service_center_id":"SC-01",
+                      "profiles":["INSTALL"],"technologies":["PON"],"height_permit":false,
+                      "shift":{"start":"08:00","end":"18:00","break_duration_min":30,
+                               "break_window":{"from":"12:00","to":"14:00"}},
+                      "equipment_start":{"ONT":3,"ROUTER":3,"STB":3},
+                      "equipment_capacity":{"ONT":3,"ROUTER":3,"STB":3}
+                    }
+                  ],
+                  "work_types":[
+                    {"code":"REPAIR","profiles":["INSTALL"],"duration_min":30,"pgp_relevant":true}
+                  ]
+                }
+                """;
+        String orderTemplate = """
+                {
+                  "order_id":"ORD-20261026-%s","work_type_code":"REPAIR","technology":"PON",
+                  "building_id":"B-%05d","requires_height":false,"access_node_id":"AN-0001",
+                  "registered_at":"2026-10-26T08:%02d:00+05:00",
+                  "slot":{"start":"2026-10-26T10:00:00+05:00","end":"2026-10-26T12:00:00+05:00"},
+                  "latest_start":"2026-10-26T10:30:00+05:00","deadline":"2026-10-26T11:00:00+05:00",
+                  "required_equipment":{"ONT":0,"ROUTER":0,"STB":0}
+                }
+                """;
+        String orders = String.join(",",
+                orderTemplate.formatted("0001", 1, 0),
+                orderTemplate.formatted("0002", 2, 20),
+                orderTemplate.formatted("0003", 3, 40));
+        String dayJson = """
+                {"absent_staff_ids":[],"orders":[%s]}
+                """.formatted(orders);
+        String matrixJson = """
+                {
+                  "points":["SC-01","B-00001","B-00002","B-00003"],
+                  "durations_sec":[[0,300,300,300],[300,0,300,300],[300,300,0,300],[300,300,300,0]],
+                  "distances_m":[[0,100,100,100],[100,0,100,100],[100,100,0,100],[100,100,100,0]]
+                }
+                """;
+
+        DispatchDaySnapshotRepository dayRepository = mock(DispatchDaySnapshotRepository.class);
+        ReferenceSnapshotRepository referenceRepository = mock(ReferenceSnapshotRepository.class);
+        TravelMatrixSnapshotRepository matrixRepository = mock(TravelMatrixSnapshotRepository.class);
+        DispatchDaySnapshotEntity day = new DispatchDaySnapshotEntity(
+                DATE, NOW, mapper.readTree(dayJson), 3);
+        ReferenceSnapshotEntity reference = new ReferenceSnapshotEntity(
+                mapper.readTree(referenceJson), 1, 1, 1, 3, 1);
+        TravelMatrixSnapshotEntity matrix = new TravelMatrixSnapshotEntity(
+                "PGP-MATRIX", mapper.readTree(matrixJson), 4);
+
+        when(dayRepository.findById(DATE)).thenReturn(Optional.of(day));
+        when(referenceRepository.findById((short) 1)).thenReturn(Optional.of(reference));
+        when(matrixRepository.findById((short) 1)).thenReturn(Optional.of(matrix));
+
+        DispatchPlanService service = new DispatchPlanService(
+                dayRepository, referenceRepository, matrixRepository, mapper);
+        PlanDtos.PlanResponse plan = service.generate(DATE, new PlanDtos.PlanRequest(60));
+
+        assertEquals(1, plan.pgpGroups().size());
+        assertEquals(3, plan.pgpGroups().get(0).orderIds().size());
+        assertEquals("AN-0001", plan.pgpGroups().get(0).accessNodeId());
+        assertEquals(1, plan.alerts().size());
+        assertEquals("PGP_DETECTED", plan.alerts().get(0).type());
+        assertTrue(plan.routes().get(0).stops().isEmpty());
+        assertTrue(plan.unassigned().isEmpty());
+        assertEquals(3, plan.summary().ordersTotal());
+        assertEquals(0, plan.summary().visitsPlanned());
+        assertEquals(0, plan.summary().unassigned());
+        assertEquals(3, plan.summary().pgpOrders());
     }
 
     private Fixture fixture(String startingEquipment, String capacity, boolean homeCenterOpen,
