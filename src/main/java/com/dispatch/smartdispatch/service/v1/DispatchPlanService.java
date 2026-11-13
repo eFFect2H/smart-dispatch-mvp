@@ -10,8 +10,12 @@ import com.dispatch.smartdispatch.exception.v1.V1ApiException;
 import com.dispatch.smartdispatch.repository.v1.DispatchDaySnapshotRepository;
 import com.dispatch.smartdispatch.repository.v1.ReferenceSnapshotRepository;
 import com.dispatch.smartdispatch.repository.v1.TravelMatrixSnapshotRepository;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -47,7 +51,7 @@ public class DispatchPlanService {
     @Transactional
     public PlanResponse generate(LocalDate date, PlanRequest request) {
         long startedAt = System.nanoTime();
-        DispatchDaySnapshotEntity day = dayRepository.findById(date)
+        DispatchDaySnapshotEntity day = dayRepository.findByDateForUpdate(date)
                 .orElseThrow(() -> V1ApiException.conflict(
                         "DAY_NOT_LOADED", "Upload day input before generating a plan"));
 
@@ -63,8 +67,13 @@ public class DispatchPlanService {
         MatrixView matrix = new MatrixView(matrixPayload);
         Map<String, JsonNode> workTypes = indexBy(reference.path("work_types"), "code");
         Map<String, ServiceCenter> centers = parseServiceCenters(reference.path("service_centers"));
+        Map<String, FrozenRoute> frozenRoutes =
+                detectFrozenRoutes(day.getPlanPayload(), day.getModelNow());
+        Set<String> frozenOrderIds = frozenOrderIds(frozenRoutes);
+
         List<StaffState> staff = parseStaff(reference.path("staff"), day.getPayload(),
                 centers, date, day.getModelNow());
+        applyFrozenRoutes(staff, frozenRoutes, day.getModelNow());
         staff.sort(Comparator.comparing(candidate -> candidate.staffId));
 
         List<JsonNode> orders = new ArrayList<>();
@@ -74,12 +83,15 @@ public class DispatchPlanService {
                 .thenComparing(order -> order.path("latest_start").asText())
                 .thenComparing(order -> order.path("order_id").asText()));
 
-        PgpDetection pgp = detectPgpGroups(date, orders, workTypes);
+        List<JsonNode> pendingOrders = orders.stream()
+                .filter(order -> !frozenOrderIds.contains(order.path("order_id").asText()))
+                .toList();
+        PgpDetection pgp = detectPgpGroups(date, pendingOrders, workTypes);
         Set<String> pgpOrderIds = pgp.orderIds;
         List<UnassignedOrderDto> unassigned = new ArrayList<>();
         List<AlertDto> alerts = new ArrayList<>(pgp.alerts);
 
-        for (JsonNode order : orders) {
+        for (JsonNode order : pendingOrders) {
             String orderId = order.path("order_id").asText();
             if (pgpOrderIds.contains(orderId)) {
                 continue;
@@ -103,12 +115,16 @@ public class DispatchPlanService {
             }
 
             List<StaffState> available = qualified.stream()
-                    .filter(candidate -> !candidate.unavailable)
+                    .filter(candidate -> !candidate.unavailable && !candidate.routeFinished)
                     .toList();
             if (available.isEmpty()) {
-                addUnassigned(unassigned, alerts, orderId, "STAFF_UNAVAILABLE",
-                        "All qualified staff members are marked absent for this day",
-                        "REASSIGN", day.getModelNow());
+                boolean allAbsent = qualified.stream().allMatch(candidate -> candidate.unavailable);
+                String reasonCode = allAbsent ? "STAFF_UNAVAILABLE" : "NO_REMAINING_ROUTE_CAPACITY";
+                String reasonText = allAbsent
+                        ? "All qualified staff members are marked absent for this day"
+                        : "All qualified staff members have already started their return to the service center";
+                addUnassigned(unassigned, alerts, orderId, reasonCode,
+                        reasonText, allAbsent ? "REASSIGN" : "RESCHEDULE", day.getModelNow());
                 continue;
             }
 
@@ -172,15 +188,91 @@ public class DispatchPlanService {
         );
 
         validatePlan(response, orders, workTypes, reference, matrix, centers,
-                day.getPayload(), date, day.getModelNow());
+                day.getPayload(), date, day.getModelNow(), frozenRoutes);
+        validateFrozenPrefixes(response, frozenRoutes);
 
         try {
-            day.updatePlan(response.planVersion(), objectMapper.valueToTree(response), day.getModelNow());
+            JsonNode storedPlan = toStoredPlanSnapshot(response);
+            day.updatePlan(response.planVersion(), storedPlan, day.getModelNow());
         } catch (IllegalArgumentException ex) {
             throw new IllegalStateException("Could not serialize generated plan", ex);
         }
         dayRepository.save(day);
         return response;
+    }
+
+    /**
+     * Creates the persisted JSON snapshot and restores the original textual offsets
+     * for every OffsetDateTime field in the plan DTO. Jackson may normalize these
+     * fields to the mapper's context timezone during valueToTree().
+     */
+    private JsonNode toStoredPlanSnapshot(PlanResponse response) {
+        ObjectNode root = objectMapper.valueToTree(response);
+        putOffsetDateTime(root, "as_of", response.asOf());
+
+        ArrayNode routeNodes = root.withArray("routes");
+        for (int routeIndex = 0; routeIndex < response.routes().size(); routeIndex++) {
+            RouteDto route = response.routes().get(routeIndex);
+            ObjectNode routeNode = (ObjectNode) routeNodes.get(routeIndex);
+            ArrayNode stopNodes = routeNode.withArray("stops");
+            for (int stopIndex = 0; stopIndex < route.stops().size(); stopIndex++) {
+                StopDto stop = route.stops().get(stopIndex);
+                ObjectNode stopNode = (ObjectNode) stopNodes.get(stopIndex);
+                putOffsetDateTime(stopNode, "arrival", stop.arrival());
+                putOffsetDateTime(stopNode, "start", stop.start());
+                putOffsetDateTime(stopNode, "end", stop.end());
+            }
+        }
+
+        ArrayNode unassignedNodes = root.withArray("unassigned");
+        for (int index = 0; index < response.unassigned().size(); index++) {
+            UnassignedOrderDto order = response.unassigned().get(index);
+            ObjectNode orderNode = (ObjectNode) unassignedNodes.get(index);
+            putOffsetDateTime(orderNode, "since", order.since());
+            putTimeWindow(orderNode, "proposed_slot", order.proposedSlot());
+        }
+
+        ArrayNode pgpNodes = root.withArray("pgp_groups");
+        for (int index = 0; index < response.pgpGroups().size(); index++) {
+            PgpGroupDto group = response.pgpGroups().get(index);
+            putOffsetDateTime((ObjectNode) pgpNodes.get(index), "detected_at", group.detectedAt());
+        }
+
+        ArrayNode cancelledNodes = root.withArray("cancelled");
+        for (int index = 0; index < response.cancelled().size(); index++) {
+            CancelledOrderDto cancelled = response.cancelled().get(index);
+            putOffsetDateTime((ObjectNode) cancelledNodes.get(index),
+                    "cancelled_at", cancelled.cancelledAt());
+        }
+
+        ArrayNode alertNodes = root.withArray("alerts");
+        for (int index = 0; index < response.alerts().size(); index++) {
+            AlertDto alert = response.alerts().get(index);
+            ObjectNode alertNode = (ObjectNode) alertNodes.get(index);
+            putOffsetDateTime(alertNode, "created_at", alert.createdAt());
+            putOffsetDateTime(alertNode, "resolved_at", alert.resolvedAt());
+            putOffsetDateTime(alertNode, "forecast_start", alert.forecastStart());
+            putTimeWindow(alertNode, "proposed_slot", alert.proposedSlot());
+        }
+
+        return root;
+    }
+
+    private void putOffsetDateTime(ObjectNode node, String field, OffsetDateTime value) {
+        if (value != null) {
+            node.put(field, value.toString());
+        }
+    }
+
+    private void putTimeWindow(ObjectNode node, String field, TimeWindowDto value) {
+        if (value == null) {
+            return;
+        }
+        ObjectNode window = (ObjectNode) node.get(field);
+        if (window != null) {
+            window.put("start", value.start().toString());
+            window.put("end", value.end().toString());
+        }
     }
 
     @Transactional(readOnly = true)
@@ -248,7 +340,11 @@ public class DispatchPlanService {
         boolean shiftBlocked = false;
         boolean restockBlocked = false;
 
-        for (int breakPosition = 0; breakPosition <= activities.size(); breakPosition++) {
+        boolean hasAnyVisit = staff.frozenStops.stream().anyMatch(stop -> VISIT.equals(stop.type()))
+                || activities.stream().anyMatch(activity -> VISIT.equals(activity.type));
+        int firstBreakPosition = !hasAnyVisit || staff.breakAlreadyTaken ? -1 : 0;
+        int lastBreakPosition = !hasAnyVisit || staff.breakAlreadyTaken ? -1 : activities.size();
+        for (int breakPosition = firstBreakPosition; breakPosition <= lastBreakPosition; breakPosition++) {
             ScheduleAttempt attempt = scheduleAt(staff, activities, breakPosition, centers, matrix);
             slotBlocked |= attempt.failure == Failure.SLOT;
             shiftBlocked |= attempt.failure == Failure.SHIFT;
@@ -271,8 +367,8 @@ public class DispatchPlanService {
         }
 
         OffsetDateTime currentTime = routeStart;
-        String currentLocation = staff.serviceCenterId;
-        Equipment inventory = staff.equipmentStart;
+        String currentLocation = staff.currentLocationId;
+        Equipment inventory = staff.routeEquipmentStart;
         List<ScheduledActivity> scheduled = new ArrayList<>();
         long totalTravelSec = 0;
         long totalDistanceM = 0;
@@ -367,34 +463,149 @@ public class DispatchPlanService {
         ));
     }
 
+    /**
+     * Freezes a route prefix once its preceding stop has ended before model_now.
+     * This includes the next stop whose travel leg has already departed, even if its
+     * planned arrival is still in the future.
+     */
+    private Map<String, FrozenRoute> detectFrozenRoutes(JsonNode previousPlanPayload,
+                                                        OffsetDateTime modelNow) {
+        if (previousPlanPayload == null || previousPlanPayload.isNull()) {
+            return Map.of();
+        }
+
+        final PlanResponse previousPlan;
+        try {
+            previousPlan = objectMapper.readerFor(PlanResponse.class)
+                    .without(DeserializationFeature.ADJUST_DATES_TO_CONTEXT_TIME_ZONE)
+                    .readValue(previousPlanPayload);
+        } catch (JsonProcessingException ex) {
+            throw new IllegalStateException("Could not read the previously stored plan for H10 validation", ex);
+        }
+
+        Map<String, FrozenRoute> result = new HashMap<>();
+        for (RouteDto route : previousPlan.routes()) {
+            List<StopDto> stops = route.stops();
+            if (stops == null || stops.size() < 2
+                    || !"DEPOT_START".equals(stops.get(0).type())) {
+                continue;
+            }
+
+            List<StopDto> frozen = new ArrayList<>();
+            frozen.add(stops.get(0));
+            for (int index = 1; index < stops.size(); index++) {
+                StopDto previousStop = stops.get(index - 1);
+                if (!previousStop.end().isBefore(modelNow)) {
+                    break;
+                }
+                frozen.add(stops.get(index));
+            }
+
+            if (frozen.size() > 1) {
+                result.put(route.staffId(), new FrozenRoute(
+                        List.copyOf(frozen), "DEPOT_END".equals(frozen.get(frozen.size() - 1).type())));
+            }
+        }
+        return Map.copyOf(result);
+    }
+
+    private Set<String> frozenOrderIds(Map<String, FrozenRoute> frozenRoutes) {
+        Set<String> result = new HashSet<>();
+        for (FrozenRoute frozenRoute : frozenRoutes.values()) {
+            for (StopDto stop : frozenRoute.stops()) {
+                if (VISIT.equals(stop.type()) && stop.orderId() != null) {
+                    result.add(stop.orderId());
+                }
+            }
+        }
+        return result;
+    }
+
+    private void applyFrozenRoutes(List<StaffState> staff,
+                                   Map<String, FrozenRoute> frozenRoutes,
+                                   OffsetDateTime modelNow) {
+        for (StaffState state : staff) {
+            FrozenRoute frozenRoute = frozenRoutes.get(state.staffId);
+            if (frozenRoute == null) {
+                continue;
+            }
+
+            state.frozenStops.addAll(frozenRoute.stops());
+            StopDto lastFrozenStop = state.frozenStops.get(state.frozenStops.size() - 1);
+            state.currentLocationId = lastFrozenStop.locationId();
+            state.routeStart = max(lastFrozenStop.end(), modelNow);
+            state.routeFinished = frozenRoute.completed();
+            state.breakAlreadyTaken = state.frozenStops.stream()
+                    .anyMatch(stop -> BREAK.equals(stop.type()));
+            if (lastFrozenStop.equipmentAfter() == null) {
+                throw new IllegalStateException("H10: frozen stop has no equipment_after for staff " + state.staffId);
+            }
+            state.routeEquipmentStart = equipment(lastFrozenStop.equipmentAfter());
+            state.equipmentRemaining = state.routeEquipmentStart;
+        }
+    }
+
+    private void validateFrozenPrefixes(PlanResponse plan, Map<String, FrozenRoute> frozenRoutes) {
+        Map<String, RouteDto> routesByStaff = new HashMap<>();
+        plan.routes().forEach(route -> routesByStaff.put(route.staffId(), route));
+
+        for (Map.Entry<String, FrozenRoute> entry : frozenRoutes.entrySet()) {
+            RouteDto actualRoute = routesByStaff.get(entry.getKey());
+            List<StopDto> expected = entry.getValue().stops();
+            if (actualRoute == null || actualRoute.stops().size() < expected.size()) {
+                throw new IllegalStateException("H10: frozen route prefix is missing for staff " + entry.getKey());
+            }
+            for (int index = 0; index < expected.size(); index++) {
+                if (!expected.get(index).equals(actualRoute.stops().get(index))) {
+                    throw new IllegalStateException("H10: frozen stop " + (index + 1)
+                            + " changed for staff " + entry.getKey());
+                }
+            }
+            if (entry.getValue().completed() && actualRoute.stops().size() != expected.size()) {
+                throw new IllegalStateException("H10: no stop may be appended after a frozen DEPOT_END");
+            }
+        }
+    }
+
     private List<RouteDto> buildRoutes(List<StaffState> staff,
                                        Map<String, ServiceCenter> centers,
                                        MatrixView matrix) {
         List<RouteDto> routes = new ArrayList<>();
         for (StaffState state : staff) {
-            if (state.unavailable) {
+            if (state.frozenStops.isEmpty() && state.unavailable) {
                 routes.add(new RouteDto(state.staffId, state.serviceCenterId, "UNAVAILABLE",
                         List.of(), emptyTotals()));
                 continue;
             }
-            if (state.activities.isEmpty()) {
-                routes.add(new RouteDto(state.staffId, state.serviceCenterId, "ACTIVE",
+
+            if (state.routeFinished) {
+                routes.add(new RouteDto(state.staffId, state.serviceCenterId,
+                        state.unavailable ? "UNAVAILABLE" : "ACTIVE",
+                        List.copyOf(state.frozenStops), routeTotals(state, state.frozenStops)));
+                continue;
+            }
+
+            if (state.activities.isEmpty() && state.frozenStops.isEmpty()) {
+                routes.add(new RouteDto(state.staffId, state.serviceCenterId,
+                        state.unavailable ? "UNAVAILABLE" : "ACTIVE",
                         List.of(), emptyTotals()));
                 continue;
             }
 
             ScheduleSearch search = scheduleWithMandatoryBreak(state, state.activities, centers, matrix);
             if (search.result == null) {
-                throw new IllegalStateException("A previously accepted route is no longer feasible for staff "
+                throw new IllegalStateException("Could not safely close route after preserving frozen stops for staff "
                         + state.staffId);
             }
 
             ScheduleResult schedule = search.result;
-            List<StopDto> stops = new ArrayList<>();
-            int sequence = 1;
-            stops.add(new StopDto(sequence++, "DEPOT_START", state.serviceCenterId,
-                    schedule.routeStart, schedule.routeStart, schedule.routeStart,
-                    null, 0L, 0L, "PLANNED", toDto(state.equipmentStart)));
+            List<StopDto> stops = new ArrayList<>(state.frozenStops);
+            int sequence = stops.size() + 1;
+            if (stops.isEmpty()) {
+                stops.add(new StopDto(sequence++, "DEPOT_START", state.serviceCenterId,
+                        schedule.routeStart, schedule.routeStart, schedule.routeStart,
+                        null, 0L, 0L, "PLANNED", toDto(state.equipmentStart)));
+            }
 
             for (ScheduledActivity activity : schedule.activities) {
                 stops.add(new StopDto(sequence++, activity.type, activity.locationId,
@@ -407,8 +618,9 @@ public class DispatchPlanService {
                     schedule.depotArrival, schedule.depotArrival, schedule.depotArrival,
                     null, schedule.returnTravelSec, schedule.returnDistanceM,
                     "PLANNED", toDto(schedule.finalEquipment)));
-            routes.add(new RouteDto(state.staffId, state.serviceCenterId, "ACTIVE",
-                    stops, routeTotals(state, schedule)));
+            routes.add(new RouteDto(state.staffId, state.serviceCenterId,
+                    state.unavailable ? "UNAVAILABLE" : "ACTIVE",
+                    stops, routeTotals(state, stops)));
         }
         return routes;
     }
@@ -593,21 +805,26 @@ public class DispatchPlanService {
         return Math.sqrt(variance) / mean;
     }
 
-    private RouteTotals routeTotals(StaffState staff, ScheduleResult schedule) {
+    private RouteTotals routeTotals(StaffState staff, List<StopDto> stops) {
         int workMin = 0;
         int visits = 0;
-        for (ScheduledActivity activity : schedule.activities) {
-            if (VISIT.equals(activity.type)) {
+        long travelSec = 0L;
+        long distanceM = 0L;
+        for (StopDto stop : stops) {
+            if (!"DEPOT_START".equals(stop.type())) {
+                travelSec += stop.travelSec() == null ? 0L : stop.travelSec();
+                distanceM += stop.distanceM() == null ? 0L : stop.distanceM();
+            }
+            if (VISIT.equals(stop.type())) {
                 visits++;
-                workMin += Math.toIntExact(Duration.between(activity.start, activity.end).toMinutes());
+                workMin += Math.toIntExact(Duration.between(stop.start(), stop.end()).toMinutes());
             }
         }
         long shiftMinutes = Duration.between(staff.shiftStart, staff.shiftEnd).toMinutes();
         long availableMinutes = Math.max(0L, shiftMinutes - staff.breakDurationMin);
         double utilization = availableMinutes == 0L ? 0.0
-                : (workMin + schedule.totalTravelSec / 60.0) / availableMinutes;
-        return new RouteTotals(visits, schedule.totalTravelSec,
-                schedule.totalDistanceM, workMin, utilization);
+                : (workMin + travelSec / 60.0) / availableMinutes;
+        return new RouteTotals(visits, travelSec, distanceM, workMin, utilization);
     }
 
     private RouteTotals emptyTotals() {
@@ -617,7 +834,8 @@ public class DispatchPlanService {
     private void validatePlan(PlanResponse plan, List<JsonNode> inputOrders,
                               Map<String, JsonNode> workTypes, JsonNode reference,
                               MatrixView matrix, Map<String, ServiceCenter> centers,
-                              JsonNode dayPayload, LocalDate date, OffsetDateTime modelNow) {
+                              JsonNode dayPayload, LocalDate date, OffsetDateTime modelNow,
+                              Map<String, FrozenRoute> frozenRoutes) {
         Map<String, JsonNode> ordersById = new HashMap<>();
         inputOrders.forEach(order -> ordersById.put(order.path("order_id").asText(), order));
         Map<String, JsonNode> staffById = indexBy(reference.path("staff"), "staff_id");
@@ -635,13 +853,17 @@ public class DispatchPlanService {
                 throw new IllegalStateException("Unknown or duplicate staff route: " + route.staffId());
             }
             boolean unavailable = absent.contains(route.staffId());
-            if (unavailable) {
+            boolean hasFrozenRoute = frozenRoutes.containsKey(route.staffId());
+            if (unavailable && !hasFrozenRoute) {
                 if (!"UNAVAILABLE".equals(route.status()) || !route.stops().isEmpty()) {
-                    throw new IllegalStateException("Unavailable staff must have an empty UNAVAILABLE route");
+                    throw new IllegalStateException("Unavailable staff without frozen work must have an empty UNAVAILABLE route");
                 }
                 continue;
             }
-            if (!"ACTIVE".equals(route.status())) {
+            if (unavailable && hasFrozenRoute && !"UNAVAILABLE".equals(route.status())) {
+                throw new IllegalStateException("H10: unavailable staff must retain UNAVAILABLE status");
+            }
+            if (!unavailable && !"ACTIVE".equals(route.status())) {
                 throw new IllegalStateException("Available staff route must have ACTIVE status");
             }
             if (route.stops().isEmpty()) {
@@ -773,6 +995,15 @@ public class DispatchPlanService {
             StopDto depotEnd = stops.get(stops.size() - 1);
             if (depotEnd.arrival().isAfter(shiftEnd)) {
                 throw new IllegalStateException("H2: DEPOT_END is after shift end");
+            }
+            if (unavailable && hasFrozenRoute) {
+                int frozenSize = frozenRoutes.get(route.staffId()).stops().size();
+                for (int index = frozenSize; index < stops.size(); index++) {
+                    String type = stops.get(index).type();
+                    if (!BREAK.equals(type) && !DEPOT_END.equals(type)) {
+                        throw new IllegalStateException("H10: unavailable staff cannot receive new stops");
+                    }
+                }
             }
         }
 
@@ -910,6 +1141,10 @@ public class DispatchPlanService {
         );
     }
 
+    private Equipment equipment(EquipmentDto dto) {
+        return new Equipment(dto.ont(), dto.router(), dto.stb());
+    }
+
     private EquipmentDto toDto(Equipment equipment) {
         return new EquipmentDto(equipment.ont, equipment.router, equipment.stb);
     }
@@ -960,12 +1195,17 @@ public class DispatchPlanService {
         private final boolean unavailable;
         private final OffsetDateTime shiftStart;
         private final OffsetDateTime shiftEnd;
-        private final OffsetDateTime routeStart;
+        private OffsetDateTime routeStart;
+        private String currentLocationId;
+        private boolean breakAlreadyTaken;
+        private boolean routeFinished;
+        private final List<StopDto> frozenStops = new ArrayList<>();
         private final int breakDurationMin;
         private final OffsetDateTime breakWindowStart;
         private final OffsetDateTime breakWindowEnd;
         private final Equipment equipmentStart;
         private final Equipment equipmentCapacity;
+        private Equipment routeEquipmentStart;
         private Equipment equipmentRemaining;
         private final List<Activity> activities = new ArrayList<>();
 
@@ -984,11 +1224,13 @@ public class DispatchPlanService {
             this.shiftStart = shiftStart;
             this.shiftEnd = shiftEnd;
             this.routeStart = routeStart;
+            this.currentLocationId = serviceCenterId;
             this.breakDurationMin = breakDurationMin;
             this.breakWindowStart = breakWindowStart;
             this.breakWindowEnd = breakWindowEnd;
             this.equipmentStart = equipmentStart;
             this.equipmentCapacity = equipmentCapacity;
+            this.routeEquipmentStart = equipmentStart;
             this.equipmentRemaining = equipmentStart;
         }
     }
@@ -1069,6 +1311,8 @@ public class DispatchPlanService {
                     slotBlocked, shiftBlocked, restockBlocked);
         }
     }
+
+    private record FrozenRoute(List<StopDto> stops, boolean completed) { }
 
     private record PgpDetection(List<PgpGroupDto> groups, Set<String> orderIds,
                                 List<AlertDto> alerts) { }
