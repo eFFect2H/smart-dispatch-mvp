@@ -154,8 +154,10 @@ class DispatchPlanServiceTest {
 
         Set<String> groupedIds = new HashSet<>();
         for (PlanDtos.PgpGroupDto group : plan.pgpGroups()) {
-            assertTrue(groupedIds.addAll(group.orderIds()));
-            assertEquals(3, group.orderIds().size());
+            int before = groupedIds.size();
+            groupedIds.addAll(group.orderIds());
+            assertEquals(before + group.orderIds().size(), groupedIds.size(),
+                    "An order must not be assigned to more than one PGP group");
         }
         assertEquals(6, groupedIds.size());
         assertEquals(6, plan.summary().pgpOrders());

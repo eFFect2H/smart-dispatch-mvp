@@ -422,10 +422,10 @@ public class DispatchPlanService {
     private List<GroupWindow> selectPgpWindows(List<JsonNode> candidates) {
         int size = candidates.size();
         PgpPartition[] bestFrom = new PgpPartition[size + 1];
-        bestFrom[size] = new PgpPartition(0, List.of());
+        bestFrom[size] = new PgpPartition(0, 0, null, null);
 
         for (int start = size - 1; start >= 0; start--) {
-            PgpPartition best = bestFrom[start + 1]; // Leaving this order outside a PGP group is allowed.
+            PgpPartition best = bestFrom[start + 1];
             OffsetDateTime startTime = parseTime(candidates.get(start).path("registered_at"));
 
             for (int end = start + 2; end < size; end++) {
@@ -435,15 +435,13 @@ public class DispatchPlanService {
                 }
 
                 PgpPartition suffix = bestFrom[end + 1];
-                List<GroupWindow> windows = new ArrayList<>(1 + suffix.windows.size());
                 OffsetDateTime detectedAt =
                         parseTime(candidates.get(start + 2).path("registered_at"));
-                windows.add(new GroupWindow(start, end, detectedAt));
-                windows.addAll(suffix.windows);
-
                 PgpPartition candidate = new PgpPartition(
                         end - start + 1 + suffix.groupedOrderCount,
-                        List.copyOf(windows));
+                        suffix.groupCount + 1,
+                        new GroupWindow(start, end, detectedAt),
+                        suffix);
                 if (isBetterPgpPartition(candidate, best)) {
                     best = candidate;
                 }
@@ -451,26 +449,34 @@ public class DispatchPlanService {
             bestFrom[start] = best;
         }
 
-        return bestFrom[0].windows;
+        List<GroupWindow> selected = new ArrayList<>();
+        PgpPartition partition = bestFrom[0];
+        while (partition.firstWindow != null) {
+            selected.add(partition.firstWindow);
+            partition = partition.suffix;
+        }
+        return selected;
     }
 
     private boolean isBetterPgpPartition(PgpPartition candidate, PgpPartition current) {
         if (candidate.groupedOrderCount != current.groupedOrderCount) {
             return candidate.groupedOrderCount > current.groupedOrderCount;
         }
-        if (candidate.windows.size() != current.windows.size()) {
-            return candidate.windows.size() < current.windows.size();
+        if (candidate.groupCount != current.groupCount) {
+            return candidate.groupCount < current.groupCount;
         }
 
-        for (int i = 0; i < candidate.windows.size(); i++) {
-            GroupWindow left = candidate.windows.get(i);
-            GroupWindow right = current.windows.get(i);
-            if (left.startIndex != right.startIndex) {
-                return left.startIndex < right.startIndex;
+        PgpPartition left = candidate;
+        PgpPartition right = current;
+        while (left.firstWindow != null && right.firstWindow != null) {
+            if (left.firstWindow.startIndex != right.firstWindow.startIndex) {
+                return left.firstWindow.startIndex < right.firstWindow.startIndex;
             }
-            if (left.endIndex != right.endIndex) {
-                return left.endIndex > right.endIndex;
+            if (left.firstWindow.endIndex != right.firstWindow.endIndex) {
+                return left.firstWindow.endIndex > right.firstWindow.endIndex;
             }
+            left = left.suffix;
+            right = right.suffix;
         }
         return false;
     }
@@ -1067,7 +1073,7 @@ public class DispatchPlanService {
     private record PgpDetection(List<PgpGroupDto> groups, Set<String> orderIds,
                                 List<AlertDto> alerts) { }
 
-    private record PgpPartition(int groupedOrderCount, List<GroupWindow> windows) { }
+    private record PgpPartition(int groupedOrderCount, int groupCount,\n                                GroupWindow firstWindow, PgpPartition suffix) { }
 
     private static final class GroupWindow {
         private final int startIndex;
