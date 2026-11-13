@@ -350,6 +350,7 @@ export default function DispatcherWorkspacePage() {
             };
             const previousPlan = plan?.date === date ? plan : null;
             await uploadDay(date, dayInput);
+            setPlan(null); setEventHistory(null); setPlanComparison(null); setSelectedOrderId(null);
             setPendingReplayOverride(false);
             await generatePlan(date);
             const [latestPlan, history] = await Promise.all([getPlan(date), getEventHistory(date)]);
