@@ -2,6 +2,7 @@ package com.dispatch.smartdispatch.dto.v1;
 
 import com.dispatch.smartdispatch.dto.v1.V1Dtos.EquipmentDto;
 import com.dispatch.smartdispatch.dto.v1.V1Dtos.OrderDto;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
@@ -15,7 +16,9 @@ class V1JsonContractTest {
 
     @BeforeEach
     void setUp() {
-        objectMapper = new ObjectMapper().registerModule(new JavaTimeModule());
+        objectMapper = new ObjectMapper()
+                .registerModule(new JavaTimeModule())
+                .disable(DeserializationFeature.ADJUST_DATES_TO_CONTEXT_TIME_ZONE);
     }
 
     @Test
@@ -39,7 +42,7 @@ class V1JsonContractTest {
     }
 
     @Test
-    void orderUsesSnakeCaseAndIgnoresTrainingFact() throws Exception {
+    void orderUsesSnakeCaseAndPreservesOffsetAndIgnoresTrainingFact() throws Exception {
         String json = """
                 {
                   "order_id": "ORD-20261026-0001",
