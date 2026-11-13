@@ -197,6 +197,9 @@ class DispatchPlanServiceTest {
         assertTrue(secondRoute.stops().stream()
                 .anyMatch(stop -> "ORD-20261026-0002".equals(stop.orderId())),
                 "The not-yet-started visit should remain eligible for replanning");
+        assertTrue(secondRoute.stops().stream()
+                .anyMatch(stop -> "RESTOCK".equals(stop.type())),
+                "The suffix must continue with the equipment inventory left by frozen work");
         assertEquals(2, secondRoute.stops().stream()
                 .filter(stop -> "VISIT".equals(stop.type())).count());
     }
