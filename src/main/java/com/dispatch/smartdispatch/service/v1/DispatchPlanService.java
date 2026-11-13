@@ -40,17 +40,20 @@ public class DispatchPlanService {
     private final ReferenceSnapshotRepository referenceRepository;
     private final TravelMatrixSnapshotRepository matrixRepository;
     private final DispatchEventReplayService eventReplayService;
+    private final DispatchAlertService alertService;
     private final ObjectMapper objectMapper;
 
     public DispatchPlanService(DispatchDaySnapshotRepository dayRepository,
                                ReferenceSnapshotRepository referenceRepository,
                                TravelMatrixSnapshotRepository matrixRepository,
                                DispatchEventReplayService eventReplayService,
+                               DispatchAlertService alertService,
                                ObjectMapper objectMapper) {
         this.dayRepository = dayRepository;
         this.referenceRepository = referenceRepository;
         this.matrixRepository = matrixRepository;
         this.eventReplayService = eventReplayService;
+        this.alertService = alertService;
         this.objectMapper = objectMapper;
     }
 
@@ -156,6 +159,7 @@ public class DispatchPlanService {
             boolean slotBlocked = false;
             boolean shiftBlocked = false;
             boolean restockBlocked = false;
+            LateRisk bestLateRisk = null;
             for (StaffState candidate : available) {
                 Equipment required = equipment(order.path("required_equipment"));
                 anyCapacity |= candidate.equipmentCapacity.canCover(required);
@@ -163,6 +167,7 @@ public class DispatchPlanService {
                 slotBlocked |= evaluated.slotBlocked;
                 shiftBlocked |= evaluated.shiftBlocked;
                 restockBlocked |= evaluated.restockBlocked;
+                bestLateRisk = betterLateRisk(bestLateRisk, evaluated.lateRisk);
                 if (evaluated.feasible && (best == null || evaluated.score < best.score)) {
                     best = evaluated;
                 }
@@ -185,6 +190,9 @@ public class DispatchPlanService {
                     addUnassigned(unassigned, alerts, orderId, "OTHER",
                             "No feasible route insertion was found", "ESCALATE", day.getModelNow());
                 }
+                if (bestLateRisk != null && orderId.equals(bestLateRisk.orderId())) {
+                    addLateRiskAlert(alerts, bestLateRisk, day.getModelNow());
+                }
                 continue;
             }
 
@@ -197,6 +205,8 @@ public class DispatchPlanService {
         PlanQuality quality = calculateQuality(orders.size(), routes, unassigned.size(),
                 pgp.groups, cancelled.size());
         long computationMs = Math.max(0L, (System.nanoTime() - startedAt) / 1_000_000L);
+        List<AlertDto> reconciledAlerts = alertService.reconcile(
+                day.getPlanPayload(), alerts, date, day.getModelNow());
         PlanResponse response = new PlanResponse(
                 date,
                 day.getPlanVersion() + 1,
@@ -205,7 +215,7 @@ public class DispatchPlanService {
                 unassigned,
                 pgp.groups,
                 cancelled,
-                alerts,
+                reconciledAlerts,
                 computationMs,
                 quality.summary
         );
@@ -250,7 +260,7 @@ public class DispatchPlanService {
                 return Candidate.feasible(staff, base, search.result, score(staff, search.result, centers, matrix));
             }
             return Candidate.blocked(staff, search.slotBlocked, search.shiftBlocked,
-                    search.restockBlocked);
+                    search.restockBlocked, search.lateRisk);
         }
 
         if (!staff.equipmentCapacity.canCover(required)) {
@@ -261,6 +271,7 @@ public class DispatchPlanService {
         boolean slotBlocked = false;
         boolean shiftBlocked = false;
         boolean restockBlocked = false;
+        LateRisk lateRisk = null;
         for (ServiceCenter center : centers.values()) {
             List<Activity> withRestock = new ArrayList<>(staff.activities);
             withRestock.add(Activity.restock(center.serviceCenterId));
@@ -270,6 +281,7 @@ public class DispatchPlanService {
             slotBlocked |= search.slotBlocked;
             shiftBlocked |= search.shiftBlocked;
             restockBlocked |= search.restockBlocked;
+            lateRisk = betterLateRisk(lateRisk, search.lateRisk);
 
             if (search.result != null) {
                 Candidate candidate = Candidate.feasible(staff, withRestock,
@@ -281,7 +293,8 @@ public class DispatchPlanService {
         }
 
         return best != null ? best
-                : Candidate.blocked(staff, slotBlocked, shiftBlocked, restockBlocked || centers.isEmpty());
+                : Candidate.blocked(staff, slotBlocked, shiftBlocked,
+                        restockBlocked || centers.isEmpty(), lateRisk);
     }
 
     private ScheduleSearch scheduleWithMandatoryBreak(StaffState staff, List<Activity> activities,
@@ -291,6 +304,7 @@ public class DispatchPlanService {
         boolean slotBlocked = false;
         boolean shiftBlocked = false;
         boolean restockBlocked = false;
+        LateRisk lateRisk = null;
 
         boolean hasAnyVisit = staff.frozenStops.stream().anyMatch(stop -> VISIT.equals(stop.type()))
                 || activities.stream().anyMatch(activity -> VISIT.equals(activity.type));
@@ -301,6 +315,7 @@ public class DispatchPlanService {
             slotBlocked |= attempt.failure == Failure.SLOT;
             shiftBlocked |= attempt.failure == Failure.SHIFT;
             restockBlocked |= attempt.failure == Failure.RESTOCK;
+            lateRisk = betterLateRisk(lateRisk, attempt.lateRisk);
             if (attempt.result != null && (best == null
                     || attempt.result.depotArrival.isBefore(best.depotArrival)
                     || (attempt.result.depotArrival.equals(best.depotArrival)
@@ -308,7 +323,7 @@ public class DispatchPlanService {
                 best = attempt.result;
             }
         }
-        return new ScheduleSearch(best, slotBlocked, shiftBlocked, restockBlocked);
+        return new ScheduleSearch(best, slotBlocked, shiftBlocked, restockBlocked, lateRisk);
     }
 
     private ScheduleAttempt scheduleAt(StaffState staff, List<Activity> activities, int breakPosition,
@@ -378,13 +393,21 @@ public class DispatchPlanService {
             OffsetDateTime slotStart = parseTime(order.path("slot").path("start"));
             OffsetDateTime latestStart = parseTime(order.path("latest_start"));
             OffsetDateTime start = max(arrival, slotStart);
-            if (start.isAfter(latestStart)) {
-                return ScheduleAttempt.failed(Failure.SLOT);
-            }
             int durationMin = activity.workType.path("duration_min").asInt();
             OffsetDateTime end = start.plusMinutes(durationMin);
-            if (end.isAfter(parseTime(order.path("deadline")))) {
-                return ScheduleAttempt.failed(Failure.SLOT);
+            OffsetDateTime deadline = parseTime(order.path("deadline"));
+            if (start.isAfter(latestStart) || end.isAfter(deadline)) {
+                int startLateness = lateMinutes(latestStart, start);
+                int deadlineLateness = lateMinutes(deadline, end);
+                int latenessMin = Math.max(startLateness, deadlineLateness);
+                LateRisk lateRisk = new LateRisk(
+                        order.path("order_id").asText(),
+                        start,
+                        latenessMin,
+                        staff.staffId,
+                        new TimeWindowDto(start, end)
+                );
+                return ScheduleAttempt.failed(Failure.SLOT, lateRisk);
             }
             Equipment required = equipment(order.path("required_equipment"));
             if (!inventory.canCover(required)) {
@@ -1131,6 +1154,57 @@ public class DispatchPlanService {
         return addedTravelSec * 1_000_000L + Math.min(addedElapsedSec, 999_999L);
     }
 
+    private void addLateRiskAlert(List<AlertDto> alerts, LateRisk risk, OffsetDateTime asOf) {
+        String message = "Прогноз начала обслуживания " + risk.orderId()
+                + " — " + risk.forecastStart()
+                + "; превышение допустимого времени составляет " + risk.latenessMin() + " мин.";
+        alerts.add(new AlertDto(
+                "ALR-" + asOf.toLocalDate().toString().replace("-", "") + "-"
+                        + String.format(Locale.ROOT, "%04d", alerts.size() + 1),
+                asOf,
+                "LATE_RISK",
+                "ACTIVE",
+                "RESCHEDULE",
+                message,
+                null,
+                risk.orderId(),
+                null,
+                null,
+                risk.forecastStart(),
+                risk.latenessMin(),
+                risk.suggestedStaffId(),
+                risk.proposedSlot(),
+                false
+        ));
+    }
+
+    private int lateMinutes(OffsetDateTime threshold, OffsetDateTime actual) {
+        long seconds = Duration.between(threshold, actual).getSeconds();
+        if (seconds <= 0) {
+            return 0;
+        }
+        return (int) Math.min(Integer.MAX_VALUE, (seconds + 59) / 60);
+    }
+
+    private LateRisk betterLateRisk(LateRisk current, LateRisk candidate) {
+        if (candidate == null) {
+            return current;
+        }
+        if (current == null) {
+            return candidate;
+        }
+        int byLateness = Integer.compare(candidate.latenessMin(), current.latenessMin());
+        if (byLateness != 0) {
+            return byLateness < 0 ? candidate : current;
+        }
+        int byStart = candidate.forecastStart().compareTo(current.forecastStart());
+        if (byStart != 0) {
+            return byStart < 0 ? candidate : current;
+        }
+        return candidate.suggestedStaffId().compareTo(current.suggestedStaffId()) < 0
+                ? candidate : current;
+    }
+
     private UnassignedOrderDto unassigned(String id, String code, String text, String action) {
         return new UnassignedOrderDto(id, code, text, action);
     }
@@ -1225,16 +1299,23 @@ public class DispatchPlanService {
                                   OffsetDateTime depotArrival, long returnTravelSec, long returnDistanceM,
                                   long totalTravelSec, long totalDistanceM, Equipment finalEquipment) { }
 
-    private record ScheduleSearch(ScheduleResult result, boolean slotBlocked,
-                                  boolean shiftBlocked, boolean restockBlocked) { }
+    private record LateRisk(String orderId, OffsetDateTime forecastStart, int latenessMin,
+                            String suggestedStaffId, TimeWindowDto proposedSlot) { }
 
-    private record ScheduleAttempt(ScheduleResult result, Failure failure) {
+    private record ScheduleSearch(ScheduleResult result, boolean slotBlocked,
+                                  boolean shiftBlocked, boolean restockBlocked, LateRisk lateRisk) { }
+
+    private record ScheduleAttempt(ScheduleResult result, Failure failure, LateRisk lateRisk) {
         private static ScheduleAttempt success(ScheduleResult result) {
-            return new ScheduleAttempt(result, null);
+            return new ScheduleAttempt(result, null, null);
         }
 
         private static ScheduleAttempt failed(Failure failure) {
-            return new ScheduleAttempt(null, failure);
+            return new ScheduleAttempt(null, failure, null);
+        }
+
+        private static ScheduleAttempt failed(Failure failure, LateRisk lateRisk) {
+            return new ScheduleAttempt(null, failure, lateRisk);
         }
     }
 
@@ -1247,10 +1328,11 @@ public class DispatchPlanService {
         private final boolean slotBlocked;
         private final boolean shiftBlocked;
         private final boolean restockBlocked;
+        private final LateRisk lateRisk;
 
         private Candidate(StaffState staff, List<Activity> activities, ScheduleResult schedule,
                           long score, boolean feasible, boolean slotBlocked,
-                          boolean shiftBlocked, boolean restockBlocked) {
+                          boolean shiftBlocked, boolean restockBlocked, LateRisk lateRisk) {
             this.staff = staff;
             this.activities = activities;
             this.schedule = schedule;
@@ -1259,18 +1341,24 @@ public class DispatchPlanService {
             this.slotBlocked = slotBlocked;
             this.shiftBlocked = shiftBlocked;
             this.restockBlocked = restockBlocked;
+            this.lateRisk = lateRisk;
         }
 
         private static Candidate feasible(StaffState staff, List<Activity> activities,
                                           ScheduleResult schedule, long score) {
             return new Candidate(staff, activities, schedule, score,
-                    true, false, false, false);
+                    true, false, false, false, null);
         }
 
         private static Candidate blocked(StaffState staff, boolean slotBlocked,
                                          boolean shiftBlocked, boolean restockBlocked) {
+            return blocked(staff, slotBlocked, shiftBlocked, restockBlocked, null);
+        }
+
+        private static Candidate blocked(StaffState staff, boolean slotBlocked,
+                                         boolean shiftBlocked, boolean restockBlocked, LateRisk lateRisk) {
             return new Candidate(staff, List.of(), null, Long.MAX_VALUE, false,
-                    slotBlocked, shiftBlocked, restockBlocked);
+                    slotBlocked, shiftBlocked, restockBlocked, lateRisk);
         }
     }
 
