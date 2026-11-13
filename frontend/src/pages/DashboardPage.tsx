@@ -63,7 +63,29 @@ export default function DashboardPage() {
     }
 
     useEffect(() => {
-        void loadData();
+        let isActive = true;
+
+        Promise.all([getTeams(), getRequests()])
+            .then(([teamsData, requestsData]) => {
+                if (!isActive) return;
+                setTeams(teamsData);
+                setRequests(requestsData);
+            })
+            .catch((err: unknown) => {
+                console.error("Ошибка загрузки данных:", err);
+                if (isActive) {
+                    setError(
+                        "Не удалось загрузить данные. Проверь, запущен ли backend и доступен ли API."
+                    );
+                }
+            })
+            .finally(() => {
+                if (isActive) setLoading(false);
+            });
+
+        return () => {
+            isActive = false;
+        };
     }, []);
 
     const safeTeams = Array.isArray(teams) ? teams : [];
