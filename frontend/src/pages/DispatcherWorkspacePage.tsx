@@ -184,6 +184,7 @@ function GanttRow(props: {
     onSelectOrder: (id: string | null) => void; color: string;
     onMarkUnavailable: (staffId: string) => void; busy: boolean;
 }) {
+    const [confirmUnavailable, setConfirmUnavailable] = useState(false);
     const staffStart = minuteOfDay(props.staff?.shift.start) ?? TIME_START;
     const staffEnd = minuteOfDay(props.staff?.shift.end) ?? TIME_END;
     const shiftStyle = {
@@ -195,16 +196,29 @@ function GanttRow(props: {
             <div className="v1-gantt-person">
                 <span className="v1-gantt-avatar">{(props.staff?.display_name || props.route.staff_id).slice(0, 1)}</span>
                 <span><strong><StaffLabel staffId={props.route.staff_id} staff={props.staff} /></strong><small>{props.route.staff_id}</small></span>
-                <button
-                    type="button"
-                    className="v1-staff-unavailable-button"
-                    title={props.route.status === "UNAVAILABLE" ? "Сотрудник уже отмечен как недоступный" : "Отметить сотрудника недоступным до конца дня"}
-                    aria-label={"Отметить " + props.route.staff_id + " недоступным"}
-                    disabled={props.busy || props.route.status === "UNAVAILABLE"}
-                    onClick={() => props.onMarkUnavailable(props.route.staff_id)}
-                >
-                    <UserX size={13} />
-                </button>
+                {confirmUnavailable ? (
+                    <span className="v1-staff-confirm">
+                        <button type="button" className="v1-staff-confirm-yes"
+                            disabled={props.busy}
+                            onClick={() => {
+                                setConfirmUnavailable(false);
+                                props.onMarkUnavailable(props.route.staff_id);
+                            }}>Да</button>
+                        <button type="button" className="v1-staff-confirm-no"
+                            onClick={() => setConfirmUnavailable(false)}>Нет</button>
+                    </span>
+                ) : (
+                    <button
+                        type="button"
+                        className="v1-staff-unavailable-button"
+                        title={props.route.status === "UNAVAILABLE" ? "Сотрудник уже отмечен как недоступный" : "Отметить сотрудника недоступным до конца дня"}
+                        aria-label={"Отметить " + props.route.staff_id + " недоступным"}
+                        disabled={props.busy || props.route.status === "UNAVAILABLE"}
+                        onClick={() => setConfirmUnavailable(true)}
+                    >
+                        <UserX size={13} />
+                    </button>
+                )}
             </div>
             <div className="v1-gantt-track">
                 <div className="v1-gantt-shift" style={shiftStyle} />
@@ -357,6 +371,7 @@ export default function DispatcherWorkspacePage() {
             const comparison = comparePlanVersions(previousPlan, latestPlan, "Обновление из API");
             if (comparison) setPlanComparison(comparison);
             setPlan(latestPlan); setEventHistory(history);
+            setModelNow(history.model_now); setEventNow(history.model_now);
             setNotice("Получен план v" + latestPlan.plan_version + " на " + date + ".");
         } catch (cause) { setError(getErrorMessage(cause)); }
         finally { setRefreshing(false); }
