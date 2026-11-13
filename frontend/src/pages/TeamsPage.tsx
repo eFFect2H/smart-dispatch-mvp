@@ -93,9 +93,6 @@ export default function TeamsPage() {
     const [form, setForm] = useState<TeamForm>(initialForm);
 
     async function loadTeams() {
-        setLoading(true);
-        setError(null);
-
         try {
             const data = await getTeams();
             setTeams(data);
@@ -104,6 +101,12 @@ export default function TeamsPage() {
         } finally {
             setLoading(false);
         }
+    }
+
+    async function refreshTeams() {
+        setLoading(true);
+        setError(null);
+        await loadTeams();
     }
 
     useEffect(() => {
@@ -224,7 +227,7 @@ export default function TeamsPage() {
                     <button
                         type="button"
                         className="secondary-button"
-                        onClick={() => void loadTeams()}
+                        onClick={() => void refreshTeams()}
                         disabled={loading}
                     >
                         <RefreshCw size={16} />
