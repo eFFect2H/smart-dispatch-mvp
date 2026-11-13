@@ -290,7 +290,7 @@ public class DispatchPlanService {
 
         OffsetDateTime currentTime = routeStart;
         String currentLocation = staff.currentLocationId;
-        Equipment inventory = staff.equipmentRemaining;
+        Equipment inventory = staff.routeEquipmentStart;
         List<ScheduledActivity> scheduled = new ArrayList<>();
         long totalTravelSec = 0;
         long totalDistanceM = 0;
@@ -460,7 +460,8 @@ public class DispatchPlanService {
             if (lastFrozenStop.equipmentAfter() == null) {
                 throw new IllegalStateException("H10: frozen stop has no equipment_after for staff " + state.staffId);
             }
-            state.equipmentRemaining = equipment(lastFrozenStop.equipmentAfter());
+            state.routeEquipmentStart = equipment(lastFrozenStop.equipmentAfter());
+            state.equipmentRemaining = state.routeEquipmentStart;
         }
     }
 
@@ -1124,6 +1125,7 @@ public class DispatchPlanService {
         private final OffsetDateTime breakWindowEnd;
         private final Equipment equipmentStart;
         private final Equipment equipmentCapacity;
+        private Equipment routeEquipmentStart;
         private Equipment equipmentRemaining;
         private final List<Activity> activities = new ArrayList<>();
 
@@ -1148,6 +1150,7 @@ public class DispatchPlanService {
             this.breakWindowEnd = breakWindowEnd;
             this.equipmentStart = equipmentStart;
             this.equipmentCapacity = equipmentCapacity;
+            this.routeEquipmentStart = equipmentStart;
             this.equipmentRemaining = equipmentStart;
         }
     }
