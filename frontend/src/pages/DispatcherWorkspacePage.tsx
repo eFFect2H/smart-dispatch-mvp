@@ -306,7 +306,7 @@ export default function DispatcherWorkspacePage() {
                 if (!alive || response.plan_version !== planVersion) return;
                 const next: Record<string, [number, number][]> = {};
                 response.routes.forEach((route) => {
-                    next[route.staff_id] = route.points.map((point) => [point.lat, point.lon]);
+                    next[route.staff_id] = route.points.map((point) => [point.lat, point.lon] as [number, number]);
                 });
                 setRoadGeometryByStaff(next);
                 setRoadGeometryError(null);
