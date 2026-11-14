@@ -3,13 +3,13 @@ import { api, TIMEOUTS_MS } from "./client";
 import { toWireEvent } from "../utils/events";
 import type {
     ApiError,
-    ApiLoadResult,
     DispatchEvent,
     EventResult,
     HealthResponse,
     DemoInfoResponse,
     DemoDayResponse,
     PlanResponse,
+    ReferenceData,
 } from "../types/v1";
 
 export async function getDemoInfo(): Promise<DemoInfoResponse> {
@@ -30,21 +30,6 @@ export async function initializeDemoDay(date: string): Promise<DemoDayResponse> 
 export async function getHealth(): Promise<HealthResponse> {
     const response = await api.get("/api/v1/health", { timeout: TIMEOUTS_MS.health });
     return response.data as HealthResponse;
-}
-
-export async function uploadReference(data: ReferenceData): Promise<ApiLoadResult> {
-    const response = await api.put("/api/v1/reference", data);
-    return response.data as ApiLoadResult;
-}
-
-export async function uploadTravelMatrix(data: TravelMatrix): Promise<ApiLoadResult> {
-    const response = await api.put("/api/v1/reference/travel-matrix", data);
-    return response.data as ApiLoadResult;
-}
-
-export async function uploadDay(date: string, data: DayInput): Promise<ApiLoadResult> {
-    const response = await api.put(`/api/v1/days/${date}`, data);
-    return response.data as ApiLoadResult;
 }
 
 /** `POST /plan` — первоначальный план (plan_version = 1). До 300 с. */
