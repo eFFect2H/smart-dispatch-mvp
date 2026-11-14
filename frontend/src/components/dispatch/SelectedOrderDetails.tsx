@@ -1,6 +1,7 @@
 import { AlertTriangle, CheckCircle2, Info, X } from "lucide-react";
-import type { Order, PlanResponse, ReferenceData } from "../../types/v1";
+import type { CancelReason, Order, PlanResponse, ReferenceData, TransferTarget } from "../../types/v1";
 import DispatchActionPanel from "./DispatchActionPanel";
+import type { VisitPhase } from "./DispatchActionPanel";
 
 interface SelectedOrderDetailsProps {
     orderId: string;
@@ -9,9 +10,9 @@ interface SelectedOrderDetailsProps {
     reference: ReferenceData | null;
     modelNow: string;
     actionsDisabled: boolean;
-    onTransferOrder: (targetStaffId: string) => void;
+    onTransferOrder: (target: TransferTarget) => void;
     onDelayOrder: (delayMin: number) => void;
-    onCancelOrder: () => void;
+    onCancelOrder: (reason: CancelReason) => void;
     onClose: () => void;
 }
 
@@ -103,22 +104,9 @@ export default function SelectedOrderDetails({
     const orderState = assignedRoute && visit ? "assigned" :
         unassigned ? "unassigned" : pgpGroup ? "pgp" : null;
     const modelNowMs = Date.parse(modelNow);
-    const isFrozen = Boolean(assignedRoute && stopIndex > 0 && Number.isFinite(modelNowMs) &&
-        assignedRoute.stops.slice(0, stopIndex).every(stop => Date.parse(stop.end) < modelNowMs));
-    const transferStaff = order && workType && reference
-        ? reference.staff.filter(member => {
-            if (member.staff_id === assignedRoute?.staff_id) return false;
-            const profileMatch = member.profiles.some(profile => workType.profiles.includes(profile));
-            const technologyMatch = member.technologies.includes(order.technology);
-            const heightMatch = !order.requires_height || member.height_permit;
-            const route = plan.routes.find(candidate => candidate.staff_id === member.staff_id);
-            const routeFinished = Boolean(route && route.stops.length > 0 &&
-                route.stops[route.stops.length - 1].type === "DEPOT_END" &&
-                route.stops.slice(0, -1).every(stop => Date.parse(stop.end) < modelNowMs));
-            return profileMatch && technologyMatch && heightMatch &&
-                route?.status !== "UNAVAILABLE" && !routeFinished;
-        })
-        : [];
+    const phase: VisitPhase = !visit ? "none" :
+        Date.parse(visit.end) <= modelNowMs ? "done" :
+        Date.parse(visit.start) < modelNowMs ? "in_progress" : "planned";
 
     return (
         <section className="v1-card v1-order-details">
@@ -150,9 +138,7 @@ export default function SelectedOrderDetails({
                 <DispatchActionPanel
                     key={orderId}
                     state={orderState}
-                    currentStaffId={assignedRoute?.staff_id}
-                    targetStaff={transferStaff}
-                    isFrozen={isFrozen}
+                    phase={phase}
                     disabled={actionsDisabled}
                     onTransfer={onTransferOrder}
                     onDelay={onDelayOrder}
@@ -189,6 +175,13 @@ export default function SelectedOrderDetails({
                         <Fact label="Запас перед визитом" value={equipmentText(equipmentBefore)} />
                         <Fact label="Запас после визита" value={equipmentText(visit.equipment_after)} />
                     </div>
+
+                    {visit.explanation && (
+                        <div className="v1-algorithm-note">
+                            <strong>Почему назначен этому сотруднику</strong>
+                            <p>{visit.explanation}</p>
+                        </div>
+                    )}
 
                     <div className="v1-explain-section">
                         <strong>Проверки квалификации и ресурсов</strong>
@@ -257,7 +250,7 @@ export default function SelectedOrderDetails({
                 <div className="v1-order-state-detail muted">
                     <strong>Наряд отменён событием</strong>
                     <p>{formatDateTime(cancelled.cancelled_at)}</p>
-                    <small>Event ID: {cancelled.event_id}</small>
+                    {cancelled.event_id && <small>Event ID: {cancelled.event_id}</small>}
                 </div>
             )}
         </section>

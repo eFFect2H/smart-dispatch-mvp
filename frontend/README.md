@@ -1,75 +1,42 @@
-# React + TypeScript + Vite
+# Smart Dispatch — frontend (рабочее место диспетчера)
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+React + TypeScript + Vite, карта — Leaflet. Работает с REST API по `api_spec.yaml`
+(кейс «Умная диспетчеризация выездных бригад», `/api/v1`).
 
-Currently, two official plugins are available:
+## Запуск
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
-
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-
+```bash
+npm ci
+npm run dev        # http://localhost:5173, запросы /api проксируются на http://localhost:8080
+npm run build      # tsc -b && vite build
 ```
 
-You can also install [eslint-plugin-react-x](https://npmx.dev/package/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://npmx.dev/package/eslint-plugin-react-dom) for React-specific lint rules:
+Другой адрес backend: `VITE_API_URL=http://host:8080 npm run dev`.
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+## Сценарий работы (соответствует шагам оценки из спецификации)
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+1. **Загрузка исходных данных** — `service_centers.json`, `staff.json`, `access_nodes.json`,
+   `work_types.csv`, `travel_matrix.json` → `PUT /reference` и `PUT /reference/travel-matrix`.
+2. **Наряды дня** — `orders_train.json`; даты в файле определяются автоматически, в день попадают
+   наряды со слотом на выбранную дату и `registered_at ≤ now` (по умолчанию 08:30) → `PUT /days/{date}`.
+3. **Построение плана** — `POST /days/{date}/plan` (таймаут клиента 330 с).
+4. **События** — форма, быстрые действия в карточке наряда и кнопка «Недоступен» в диаграмме смен:
+   `POST /days/{date}/events`, затем `GET /days/{date}/plan`.
+   Поддержаны все типы: `NEW_ORDER`, `ORDER_CANCELLED`, `VISIT_DELAYED`, `ORDER_TRANSFERRED`,
+   `STAFF_UNAVAILABLE`, `TIME_TICK`. Модельное время задаётся в панели над картой («Применить» = `TIME_TICK`).
+5. **Сценарий событий** — `events_example.json`: события по возрастанию `timestamp`, триггеры
+   (`VISIT_DELAYED`/`ORDER_TRANSFERRED`) разворачиваются по текущему плану, как делает оркестратор.
 
-```
+Правила, которые интерфейс проверяет до отправки: задержка и передача — только для начатого визита
+(`start ≤ timestamp`), отмена — только для ещё не начатого, время события не раньше модельного времени плана.
+Время ответа на событие измеряется и подсвечивается, если оно превысило лимит 10 с.
+
+## Совместимость с backend
+
+Тело события содержит поля спецификации (`type`, `timestamp`, …) **и** поля прежнего формата backend
+(`event_type`, `occurred_at`, `payload`) — спецификация требует игнорировать неизвестные поля.
+Если после события `GET /plan` не отражает его (`based_on_event_id` не совпал), клиент один раз вызывает
+`POST /plan` и игнорирует `409`. Когда backend будет полностью соответствовать спецификации, оба механизма
+перестанут срабатывать сами (`src/utils/events.ts`, `src/api/v1Dispatch.ts`).
+
+Страницы «Обзор / Заявки / Бригады» относятся к исходному MVP (`/api/teams`, `/api/requests`) и в API кейса не входят.

@@ -66,7 +66,7 @@ function collectOrderStates(plan: PlanResponse): Map<string, PlanItemState> {
     }
 
     for (const item of plan.cancelled) {
-        states.set(item.order_id, { kind: "CANCELLED", reasonText: item.event_id });
+        states.set(item.order_id, { kind: "CANCELLED", reasonText: item.event_id ?? undefined });
     }
 
     return states;

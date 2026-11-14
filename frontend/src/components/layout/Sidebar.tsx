@@ -8,10 +8,10 @@ import {
 import { NavLink } from "react-router-dom";
 
 const links = [
-    { to: "/", label: "Обзор", icon: LayoutDashboard },
-    { to: "/requests", label: "Заявки", icon: ClipboardList },
-    { to: "/teams", label: "Бригады", icon: Users },
     { to: "/dispatch", label: "Рабочее место", icon: Route },
+    { to: "/overview", label: "Обзор (MVP)", icon: LayoutDashboard },
+    { to: "/requests", label: "Заявки (MVP)", icon: ClipboardList },
+    { to: "/teams", label: "Бригады (MVP)", icon: Users },
 ];
 
 export default function Sidebar() {
@@ -34,7 +34,7 @@ export default function Sidebar() {
                     <NavLink
                         key={to}
                         to={to}
-                        end={to === "/"}
+                        end
                         className={({ isActive }) =>
                             `nav-link${isActive ? " active" : ""}`
                         }
