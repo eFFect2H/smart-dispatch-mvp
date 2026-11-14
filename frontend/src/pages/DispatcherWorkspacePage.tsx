@@ -661,7 +661,7 @@ export default function DispatcherWorkspacePage() {
                         <div><strong>{demoInfo?.staffCount ?? "—"}</strong><span>сотрудников</span></div>
                         <div><strong>{demoInfo?.serviceCenterCount ?? "—"}</strong><span>сервисных центров</span></div>
                         <div><strong>{demoInfo?.buildingCount ?? "—"}</strong><span>объектов</span></div>
-                        <div><strong>{demoInfo?.orderCount ?? allOrders.length || "—"}</strong><span>тестовых нарядов</span></div>
+                        <div><strong>{(demoInfo?.orderCount ?? allOrders.length) || "—"}</strong><span>тестовых нарядов</span></div>
                     </div>
                     <div className="v1-demo-footer">
                         <div className="v1-demo-model-time">
@@ -730,7 +730,7 @@ export default function DispatcherWorkspacePage() {
                                     pathOptions={{ color: "#64748b", fillColor: "#cbd5e1", fillOpacity: 0.8, weight: 1 }}>
                                     <Popup><strong>{building.building_id}</strong><br />{building.address}<br />Узел {node.access_node_id}</Popup>
                                 </CircleMarker>))}
-                            {mapRoutes.map(({ route, points }, index) => {}
+                            {mapRoutes.map(({ route, points }, index) => {
                                 const color = ROUTE_COLORS[index % ROUTE_COLORS.length];
                                 const positions = points.map((point) => [point.lat, point.lon] as [number, number]);
                                 return <Fragment key={route.staff_id}>
