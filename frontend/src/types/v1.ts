@@ -329,3 +329,19 @@ export interface DemoDayResponse {
     orderCount: number;
     orders: Order[];
 }
+
+export interface RouteGeometryPoint {
+    lat: number;
+    lon: number;
+}
+
+export interface RouteGeometry {
+    staff_id: string;
+    points: RouteGeometryPoint[];
+}
+
+export interface RouteGeometryResponse {
+    date: string;
+    plan_version: number;
+    routes: RouteGeometry[];
+}
