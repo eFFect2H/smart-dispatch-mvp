@@ -281,7 +281,10 @@ export default function DispatcherWorkspacePage() {
                 setEventNow(info.initialModelNow);
             })
             .catch((cause) => {
-                if (alive) setError(describeApiError(cause));
+                if (alive) {
+                    setError(describeApiError(cause));
+                    setDataLoading(false);
+                }
             });
         return () => { alive = false; };
     }, []);
