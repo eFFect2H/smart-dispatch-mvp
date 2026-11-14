@@ -101,6 +101,77 @@ public class OsrmMatrixClient
         return matrix;
     }
 
+    /** Returns road-network duration and distance matrices from OSRM in seconds and metres. */
+    public RoadMatrix getRoadMatrix(List<Coordinate> coordinates) {
+        if (coordinates == null || coordinates.isEmpty()) {
+            return new RoadMatrix(List.of(), List.of());
+        }
+        if (coordinates.size() > 100) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "OSRM demo matrix is limited to 100 points. Split the area into zones.");
+        }
+
+        String joinedCoordinates = coordinates.stream()
+                .map(point -> point.longitude() + "," + point.latitude())
+                .collect(Collectors.joining(";"));
+        String url = baseUrl + "/table/v1/" + profile + "/" + joinedCoordinates
+                + "?annotations=duration,distance";
+
+        final JsonNode json;
+        try {
+            json = restTemplate.getForObject(url, JsonNode.class);
+        } catch (RestClientException ex) {
+            throw new ResponseStatusException(HttpStatus.BAD_GATEWAY,
+                    "Could not build the Yekaterinburg road matrix from OSRM. Check internet access "
+                            + "or routing.osrm.base-url.", ex);
+        }
+
+        if (json == null || !"Ok".equals(json.path("code").asText())) {
+            String error = json == null ? "empty response" : json.path("message").asText("unknown error");
+            throw new ResponseStatusException(HttpStatus.BAD_GATEWAY, "OSRM returned an error: " + error);
+        }
+
+        JsonNode durations = json.path("durations");
+        JsonNode distances = json.path("distances");
+        int size = coordinates.size();
+        if (!durations.isArray() || durations.size() != size
+                || !distances.isArray() || distances.size() != size) {
+            throw new ResponseStatusException(HttpStatus.BAD_GATEWAY,
+                    "OSRM returned a matrix with an unexpected size.");
+        }
+
+        List<List<Long>> durationRows = new ArrayList<>(size);
+        List<List<Long>> distanceRows = new ArrayList<>(size);
+        for (int from = 0; from < size; from++) {
+            JsonNode durationRow = durations.path(from);
+            JsonNode distanceRow = distances.path(from);
+            if (!durationRow.isArray() || durationRow.size() != size
+                    || !distanceRow.isArray() || distanceRow.size() != size) {
+                throw new ResponseStatusException(HttpStatus.BAD_GATEWAY,
+                        "OSRM returned an invalid matrix row " + from + ".");
+            }
+
+            List<Long> durationValues = new ArrayList<>(size);
+            List<Long> distanceValues = new ArrayList<>(size);
+            for (int to = 0; to < size; to++) {
+                JsonNode duration = durationRow.path(to);
+                JsonNode distance = distanceRow.path(to);
+                if (!duration.isNumber() || !distance.isNumber()) {
+                    throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY,
+                            "OSRM could not find a road route between all demo points. "
+                                    + "Check the Yekaterinburg coordinates.");
+                }
+                durationValues.add(from == to ? 0L : Math.max(1L, (long) Math.ceil(duration.asDouble())));
+                distanceValues.add(from == to ? 0L : Math.max(1L, (long) Math.ceil(distance.asDouble())));
+            }
+            durationRows.add(List.copyOf(durationValues));
+            distanceRows.add(List.copyOf(distanceValues));
+        }
+        return new RoadMatrix(List.copyOf(durationRows), List.copyOf(distanceRows));
+    }
+
+    public record RoadMatrix(List<List<Long>> durationsSec, List<List<Long>> distancesM) { }
+
     /**
      * Получает реальную геометрию автомобильного маршрута из OSRM.
      * При ошибке возвращает пустой список, чтобы не отменять

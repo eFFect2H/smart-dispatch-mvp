@@ -3,34 +3,34 @@ import { api, TIMEOUTS_MS } from "./client";
 import { toWireEvent } from "../utils/events";
 import type {
     ApiError,
-    ApiLoadResult,
-    DayInput,
     DispatchEvent,
     EventResult,
     HealthResponse,
+    DemoInfoResponse,
+    DemoDayResponse,
     PlanResponse,
     ReferenceData,
-    TravelMatrix,
+    RouteGeometryResponse,
 } from "../types/v1";
+
+export async function getDemoInfo(): Promise<DemoInfoResponse> {
+    const response = await api.get("/api/v1/demo");
+    return response.data as DemoInfoResponse;
+}
+
+export async function getReference(): Promise<ReferenceData> {
+    const response = await api.get("/api/v1/reference");
+    return response.data as ReferenceData;
+}
+
+export async function initializeDemoDay(date: string): Promise<DemoDayResponse> {
+    const response = await api.post(`/api/v1/demo/days/${date}/initialize`);
+    return response.data as DemoDayResponse;
+}
 
 export async function getHealth(): Promise<HealthResponse> {
     const response = await api.get("/api/v1/health", { timeout: TIMEOUTS_MS.health });
     return response.data as HealthResponse;
-}
-
-export async function uploadReference(data: ReferenceData): Promise<ApiLoadResult> {
-    const response = await api.put("/api/v1/reference", data);
-    return response.data as ApiLoadResult;
-}
-
-export async function uploadTravelMatrix(data: TravelMatrix): Promise<ApiLoadResult> {
-    const response = await api.put("/api/v1/reference/travel-matrix", data);
-    return response.data as ApiLoadResult;
-}
-
-export async function uploadDay(date: string, data: DayInput): Promise<ApiLoadResult> {
-    const response = await api.put(`/api/v1/days/${date}`, data);
-    return response.data as ApiLoadResult;
 }
 
 /** `POST /plan` — первоначальный план (plan_version = 1). До 300 с. */
@@ -41,6 +41,13 @@ export async function generatePlan(date: string, timeLimitSec = 300): Promise<Pl
         { timeout: TIMEOUTS_MS.plan },
     );
     return response.data as PlanResponse;
+}
+
+export async function getRouteGeometries(date: string): Promise<RouteGeometryResponse> {
+    const response = await api.get(`/api/v1/days/${date}/plan/geometry`, {
+        timeout: TIMEOUTS_MS.geometry,
+    });
+    return response.data as RouteGeometryResponse;
 }
 
 export async function getPlan(date: string): Promise<PlanResponse> {

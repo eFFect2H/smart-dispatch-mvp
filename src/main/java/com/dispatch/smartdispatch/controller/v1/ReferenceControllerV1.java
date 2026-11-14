@@ -20,6 +20,11 @@ public class ReferenceControllerV1 {
         this.matrixService = matrixService;
     }
 
+    @GetMapping
+    public com.fasterxml.jackson.databind.JsonNode getReference() {
+        return referenceService.getPayloadOrThrow();
+    }
+
     @PutMapping
     public LoadResult replaceReference(@Valid @RequestBody ReferenceDataRequest request) {
         return referenceService.replace(request);

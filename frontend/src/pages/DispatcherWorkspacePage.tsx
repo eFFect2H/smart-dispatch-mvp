@@ -1,15 +1,15 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, CSSProperties } from "react";
 import {
-    Activity, AlertTriangle, CalendarDays, CheckCircle2, Clock3, Filter, Layers3,
-    ListVideo, MapPinned, Play, RefreshCw, Route, Send, Square, Upload, UserX, XCircle,
+    Activity, AlertTriangle, CalendarDays, CheckCircle2, Clock3, Database, Filter, Layers3,
+    ListVideo, MapPinned, Play, RefreshCw, Route, Send, Square, UserX, XCircle,
 } from "lucide-react";
 import { CircleMarker, MapContainer, Polyline, Popup, TileLayer, useMap } from "react-leaflet";
 import "leaflet/dist/leaflet.css";
 
 import {
-    describeApiError, generatePlan, getHealth, getPlan, sendEvent, uploadDay,
-    uploadReference, uploadTravelMatrix,
+    describeApiError, generatePlan, getDemoInfo, getHealth, getPlan, getReference, getRouteGeometries,
+    initializeDemoDay, sendEvent,
 } from "../api/v1Dispatch";
 import PlanComparisonPanel from "../components/dispatch/PlanComparisonPanel";
 import SelectedOrderDetails from "../components/dispatch/SelectedOrderDetails";
@@ -19,18 +19,16 @@ import {
     addMinutes, findVisit, isIsoWithOffset, newEventId, offsetMinutes,
     triggerFireTime, triggerToEvent, validateScenario,
 } from "../utils/events";
-import { parseWorkTypes } from "../utils/workTypesCsv";
 import type {
-    AccessNode, CancelReason, DayInput, DispatchEvent, EventLogEntry, EventType, Order,
+    AccessNode, CancelReason, DemoInfoResponse, DispatchEvent, EventLogEntry, EventType, Order,
     PlanAlert, PlanResponse, PlanRoute, PlanStop, ReferenceData, ScenarioTrigger,
-    ServiceCenter, StaffMember, TransferTarget, TravelMatrix, UnassignedOrder, UnavailableReason,
+    ServiceCenter, StaffMember, TransferTarget, UnassignedOrder, UnavailableReason,
 } from "../types/v1";
 
 const ROUTE_COLORS = ["#3563e9", "#0d9488", "#d97706", "#be4b8a", "#6477d7", "#7c5ce7"];
 const TIME_START = 8 * 60;
 const TIME_END = 22 * 60;
 const EVENT_LIMIT_MS = 10_000;
-const REFERENCE_STORAGE_KEY = "smart-dispatch.reference.v1";
 
 const EVENT_LABELS: Record<EventType, string> = {
     NEW_ORDER: "Новый наряд",
@@ -104,21 +102,6 @@ async function readJson(file: File): Promise<unknown> {
         throw new Error(file.name + ": некорректный JSON (" + message + ")", { cause: error });
     }
 }
-function unwrapArray<T>(value: unknown, key: string, fileName: string): T[] {
-    const candidate = Array.isArray(value) ? value :
-        typeof value === "object" && value !== null && key in value ?
-            (value as Record<string, unknown>)[key] : null;
-    if (!Array.isArray(candidate)) throw new Error(fileName + ": ожидался массив или объект с полем " + key);
-    return candidate as T[];
-}
-function selectDayOrders(allOrders: Order[], date: string, modelNow: string): Order[] {
-    if (!isIsoWithOffset(modelNow)) {
-        throw new Error("Укажи now в формате ISO-8601 со смещением, например 2026-10-26T08:30:00+05:00");
-    }
-    const nowMs = Date.parse(modelNow);
-    return allOrders.filter((order) => offsetDate(order.slot?.start ?? "") === date &&
-        Date.parse(order.registered_at) <= nowMs);
-}
 function locationIndex(reference: ReferenceData | null): Map<string, { lat: number; lon: number; title: string }> {
     const result = new Map<string, { lat: number; lon: number; title: string }>();
     if (!reference) return result;
@@ -128,22 +111,6 @@ function locationIndex(reference: ReferenceData | null): Map<string, { lat: numb
         result.set(building.building_id, { lat: building.lat, lon: building.lon, title: building.address })));
     return result;
 }
-function loadStoredReference(): ReferenceData | null {
-    try {
-        const raw = localStorage.getItem(REFERENCE_STORAGE_KEY);
-        return raw ? JSON.parse(raw) as ReferenceData : null;
-    } catch {
-        return null;
-    }
-}
-function storeReference(reference: ReferenceData) {
-    try {
-        localStorage.setItem(REFERENCE_STORAGE_KEY, JSON.stringify(reference));
-    } catch {
-        // Хранилище недоступно или переполнено — карта просто потребует повторной загрузки справочников.
-    }
-}
-
 function MapAutoFit({ points }: { points: [number, number][] }) {
     const map = useMap();
     useEffect(() => {
@@ -231,21 +198,15 @@ function GanttRow(props: {
 export default function DispatcherWorkspacePage() {
     const today = localToday();
     const [date, setDate] = useState(today);
-    const [modelNow, setModelNow] = useState(today + "T08:30:00+05:00");
-    const [serviceCentersFile, setServiceCentersFile] = useState<File | null>(null);
-    const [staffFile, setStaffFile] = useState<File | null>(null);
-    const [accessNodesFile, setAccessNodesFile] = useState<File | null>(null);
-    const [workTypesFile, setWorkTypesFile] = useState<File | null>(null);
-    const [matrixFile, setMatrixFile] = useState<File | null>(null);
-    const [ordersFile, setOrdersFile] = useState<File | null>(null);
-    const [scenarioFile, setScenarioFile] = useState<File | null>(null);
-    const [reference, setReference] = useState<ReferenceData | null>(loadStoredReference);
+    const [modelNow, setModelNow] = useState(today + "T08:45:00+05:00");
+    const [demoInfo, setDemoInfo] = useState<DemoInfoResponse | null>(null);
+    const [reference, setReference] = useState<ReferenceData | null>(null);
     const [allOrders, setAllOrders] = useState<Order[]>([]);
-    const [orderDates, setOrderDates] = useState<string[]>([]);
+    const [scenarioFile, setScenarioFile] = useState<File | null>(null);
     const [plan, setPlan] = useState<PlanResponse | null>(null);
     const [planComparison, setPlanComparison] = useState<PlanComparison | null>(null);
     const [eventLog, setEventLog] = useState<EventLogEntry[]>([]);
-    const [absentStaffInput, setAbsentStaffInput] = useState("");
+    const [dataLoading, setDataLoading] = useState(true);
     const [eventType, setEventType] = useState<EventType>("VISIT_DELAYED");
     const [eventOrderId, setEventOrderId] = useState("");
     const [eventStaffId, setEventStaffId] = useState("");
@@ -259,7 +220,9 @@ export default function DispatcherWorkspacePage() {
     const [staffFilter, setStaffFilter] = useState("ALL");
     const [activePanel, setActivePanel] = useState<"unassigned" | "risk" | "pgp" | "events">("unassigned");
     const [selectedOrderId, setSelectedOrderId] = useState<string | null>(null);
-    const [uploading, setUploading] = useState(false);
+    const [roadGeometryByStaff, setRoadGeometryByStaff] = useState<Record<string, [number, number][]>>({});
+    const [roadGeometryPlanVersion, setRoadGeometryPlanVersion] = useState<number | null>(null);
+    const [roadGeometryError, setRoadGeometryError] = useState<string | null>(null);
     const [building, setBuilding] = useState(false);
     const [sending, setSending] = useState(false);
     const [refreshing, setRefreshing] = useState(false);
@@ -281,6 +244,11 @@ export default function DispatcherWorkspacePage() {
     })), [filteredRoutes, locationById]);
     const mapPoints = useMemo<[number, number][]>(() =>
         mapRoutes.flatMap(({ points }) => points.map((point) => [point.lat, point.lon] as [number, number])), [mapRoutes]);
+    const cityMapPoints = useMemo<[number, number][]>(() => [
+        ...(reference?.service_centers ?? []).map((center) => [center.lat, center.lon] as [number, number]),
+        ...(reference?.access_nodes ?? []).flatMap((node) =>
+            node.buildings.map((building) => [building.lat, building.lon] as [number, number])),
+    ], [reference]);
     const lateRiskAlerts = (plan?.alerts ?? []).filter((alert: PlanAlert) => alert.type === "LATE_RISK");
     const activeAlerts = lateRiskAlerts.filter((alert) => alert.status === "ACTIVE");
     const resolvedAlerts = lateRiskAlerts.filter((alert) => alert.status !== "ACTIVE");
@@ -290,7 +258,11 @@ export default function DispatcherWorkspacePage() {
     }));
     const planOrderIds = useMemo(() => (plan?.routes ?? []).flatMap((route) =>
         route.stops.filter((stop) => stop.type === "VISIT" && stop.order_id).map((stop) => stop.order_id as string)), [plan]);
-    const busy = sending || building || uploading;
+    const planVersion = plan?.plan_version ?? null;
+    const roadGeometryReady = planVersion !== null && roadGeometryPlanVersion === planVersion;
+    const roadGeometryRoutesCount = mapRoutes.filter(({ route }) =>
+        (roadGeometryByStaff[route.staff_id]?.length ?? 0) > 1).length;
+    const busy = sending || building || dataLoading;
 
     // Состояние сервиса: GET /api/v1/health.
     useEffect(() => {
@@ -303,31 +275,91 @@ export default function DispatcherWorkspacePage() {
         return () => { alive = false; window.clearInterval(timer); };
     }, []);
 
-    // Если сервис уже построил план на выбранную дату, показываем его (например, после перезагрузки страницы).
+    // Загружаем конфигурацию города и справочники из PostgreSQL.
     useEffect(() => {
         let alive = true;
-        getPlan(date)
-            .then((latest) => {
+        Promise.all([getDemoInfo(), getReference()])
+            .then(([info, loadedReference]) => {
                 if (!alive) return;
-                setPlan(latest);
-                setEventNow(latest.as_of);
-                setModelNow(latest.as_of);
+                setDemoInfo(info);
+                setReference(loadedReference);
+                setDate(info.today);
+                setModelNow(info.initialModelNow);
+                setEventNow(info.initialModelNow);
             })
-            .catch(() => { /* 404 — план ещё не построен */ });
+            .catch((cause) => {
+                if (alive) {
+                    setError(describeApiError(cause));
+                    setDataLoading(false);
+                }
+            });
         return () => { alive = false; };
-    }, [date]);
+    }, []);
+
+    // Геометрия запрашивается отдельно от оптимизации и только для отображения линий на карте.
+    useEffect(() => {
+        if (planVersion === null) return;
+        let alive = true;
+        getRouteGeometries(date)
+            .then((response) => {
+                if (!alive || response.plan_version !== planVersion) return;
+                const next: Record<string, [number, number][]> = {};
+                response.routes.forEach((route) => {
+                    next[route.staff_id] = route.points.map((point) => [point.lat, point.lon] as [number, number]);
+                });
+                setRoadGeometryByStaff(next);
+                setRoadGeometryError(null);
+                setRoadGeometryPlanVersion(response.plan_version);
+            })
+            .catch((cause) => {
+                if (!alive) return;
+                setRoadGeometryByStaff({});
+                setRoadGeometryError(describeApiError(cause));
+                setRoadGeometryPlanVersion(planVersion);
+            });
+        return () => { alive = false; };
+    }, [date, planVersion]);
+
+    // День создаётся из шаблона в PostgreSQL; повторный вызов не перезаписывает события или план.
+    useEffect(() => {
+        if (!demoInfo) return;
+        let alive = true;
+        initializeDemoDay(date)
+            .then(async (day) => {
+                const latest = await getPlan(date).catch(() => null);
+                if (!alive) return;
+                setAllOrders(day.orders);
+                setModelNow(day.modelNow);
+                setPlan(latest);
+                setEventNow(latest?.as_of ?? day.modelNow);
+                if (latest) {
+                    setNotice("Из PostgreSQL загружен план v" + latest.plan_version + " на " + date + ".");
+                } else {
+                    setNotice("Из PostgreSQL загружены " + day.orderCount + " тестовых нарядов для " + day.city + ".");
+                }
+            })
+            .catch((cause) => {
+                if (alive) setError(describeApiError(cause));
+            })
+            .finally(() => {
+                if (alive) setDataLoading(false);
+            });
+        return () => { alive = false; };
+    }, [date, demoInfo]);
 
     function fileHandler(setter: (file: File | null) => void) {
         return (event: ChangeEvent<HTMLInputElement>) => setter(event.target.files?.[0] ?? null);
     }
     function resetDayState() {
         setPlan(null); setEventLog([]); setPlanComparison(null); setSelectedOrderId(null);
+        setRoadGeometryByStaff({}); setRoadGeometryPlanVersion(null); setRoadGeometryError(null);
     }
     function changeDate(value: string) {
         if (!value) return;
+        setDataLoading(true);
         setDate(value);
-        setModelNow(value + modelNow.slice(10));
-        setEventNow(value + eventNow.slice(10));
+        setEventNow(value + "T08:45:00+05:00");
+        setAllOrders([]);
         resetDayState();
     }
     function applyPlan(next: PlanResponse) {
@@ -335,81 +367,33 @@ export default function DispatcherWorkspacePage() {
         setEventNow(next.as_of);
     }
 
-    async function handleOrdersFile(event: ChangeEvent<HTMLInputElement>) {
-        const file = event.target.files?.[0] ?? null;
-        setOrdersFile(file);
-        if (!file) return;
-        try {
-            const orders = unwrapArray<Order>(await readJson(file), "orders", file.name);
-            const dates = [...new Set(orders.map((order) => offsetDate(order.slot?.start ?? "")).filter(Boolean))].sort();
-            setAllOrders(orders);
-            setOrderDates(dates);
-            setError(null);
-            if (dates.length && !dates.includes(date)) changeDate(dates[0]);
-            setNotice("В файле " + orders.length + " нарядов за " + dates.length + " дн.: " + dates.join(", ") + ".");
-        } catch (cause) {
-            setOrderDates([]);
-            setError(describeApiError(cause));
-        }
-    }
-
-    async function handleUploadReference() {
-        if (!serviceCentersFile || !staffFile || !accessNodesFile || !workTypesFile || !matrixFile) {
-            setError("Выбери service_centers.json, staff.json, access_nodes.json, work_types.csv и travel_matrix.json.");
+    async function handleBuildPlan() {
+        if (!demoInfo || !reference) {
+            setError("Не удалось загрузить конфигурацию и справочники из PostgreSQL.");
             return;
         }
-        setUploading(true); setError(null); setNotice(null);
+        setBuilding(true);
+        setError(null);
+        setNotice(null);
         try {
-            const values = await Promise.all([
-                readJson(serviceCentersFile), readJson(staffFile), readJson(accessNodesFile),
-                readFile(workTypesFile), readJson(matrixFile),
-            ]);
-            const nextReference: ReferenceData = {
-                service_centers: unwrapArray<ServiceCenter>(values[0], "service_centers", serviceCentersFile.name),
-                staff: unwrapArray<StaffMember>(values[1], "staff", staffFile.name),
-                access_nodes: unwrapArray<AccessNode>(values[2], "access_nodes", accessNodesFile.name),
-                work_types: parseWorkTypes(values[3] as string),
-            };
-            const matrixRaw = values[4];
-            const nextMatrix = typeof matrixRaw === "object" && matrixRaw !== null && "travel_matrix" in matrixRaw
-                ? (matrixRaw as { travel_matrix: TravelMatrix }).travel_matrix : matrixRaw as TravelMatrix;
-            await uploadReference(nextReference);
-            // Загрузка справочников удаляет все дни, планы и события на сервере.
-            setReference(nextReference);
-            storeReference(nextReference);
-            resetDayState();
-            await uploadTravelMatrix(nextMatrix);
-            setNotice("Справочники и матрица загружены: " + nextReference.staff.length + " сотрудников, " +
-                nextReference.service_centers.length + " СЦ, " + nextReference.access_nodes.length +
-                " узлов. Состояние дней сброшено — загрузи день заново.");
-        } catch (cause) { setError(describeApiError(cause)); }
-        finally { setUploading(false); }
-    }
+            // Инициализация идемпотентна: существующий день с событиями и планом не заменяется.
+            const demoDay = await initializeDemoDay(date);
+            setAllOrders(demoDay.orders);
+            setModelNow(demoDay.modelNow);
 
-    async function handleBuildPlan() {
-        if (!allOrders.length) { setError("Выбери orders_train.json или файл нарядов одного дня."); return; }
-        if (!reference) { setError("Сначала загрузи справочники и матрицу."); return; }
-        setBuilding(true); setError(null); setNotice(null);
-        try {
-            const selectedOrders = selectDayOrders(allOrders, date, modelNow);
-            if (!selectedOrders.length) {
-                throw new Error("В файле нет нарядов со слотом на " + date + " и registered_at не позже " + modelNow + ".");
-            }
-            const dayInput: DayInput = {
-                date, now: modelNow, orders: selectedOrders,
-                absent_staff_ids: absentStaffInput.split(",").map((value) => value.trim()).filter(Boolean),
-            };
             const previousPlan = plan?.date === date ? plan : null;
-            await uploadDay(date, dayInput);
-            resetDayState();
             const built = await generatePlan(date);
             applyPlan(built);
-            setPlanComparison(comparePlanVersions(previousPlan, built, "Перестроение исходного дня"));
-            setNotice("План v" + built.plan_version + " построен за " + (built.computation_ms ?? 0) +
-                " мс. В день загружено " + selectedOrders.length + " нарядов.");
+            setPlanComparison(comparePlanVersions(previousPlan, built, "Перестроение дня из PostgreSQL"));
+            setNotice("План v" + built.plan_version + " построен для " + demoDay.city +
+                ": " + demoDay.orderCount + " нарядов, " + demoDay.staffCount + " сотрудников. Расчёт: " +
+                (built.computation_ms ?? 0) + " мс.");
             setActivePanel("unassigned");
-        } catch (cause) { setError(describeApiError(cause)); }
-        finally { setBuilding(false); }
+        } catch (cause) {
+            setError(describeApiError(cause));
+        } finally {
+            setBuilding(false);
+        }
     }
 
     async function handleRefresh() {
@@ -687,14 +671,7 @@ export default function DispatcherWorkspacePage() {
                             : health.state === "down" ? "Сервис недоступен" : "Проверка сервиса…"}
                     </span>
                     <label className="v1-date-control"><CalendarDays size={16} />
-                        {orderDates.length > 0 ? (
-                            <select value={orderDates.includes(date) ? date : ""} onChange={(event) => changeDate(event.target.value)}>
-                                {!orderDates.includes(date) && <option value="">{date}</option>}
-                                {orderDates.map((value) => <option key={value} value={value}>{value}</option>)}
-                            </select>
-                        ) : (
-                            <input type="date" value={date} onChange={(event) => changeDate(event.target.value)} />
-                        )}
+                        <input type="date" value={date} onChange={(event) => changeDate(event.target.value)} />
                     </label>
                     <button className="secondary-button" type="button" onClick={() => void handleRefresh()} disabled={refreshing || busy}>
                         <RefreshCw size={15} className={refreshing ? "v1-spin" : ""} /> Обновить
@@ -706,33 +683,40 @@ export default function DispatcherWorkspacePage() {
             {notice && <div className="v1-notice" role="status"><CheckCircle2 size={16} /><span>{notice}</span><button type="button" onClick={() => setNotice(null)}><XCircle size={15} /></button></div>}
 
             <details className="v1-setup-panel" open={!plan}>
-                <summary><span><Upload size={17} /> Загрузка исходных данных</span><small>JSON / CSV · шаги 2–5 сценария оценки</small></summary>
-                <div className="v1-setup-grid">
-                    <label className="v1-file-field">Сервисные центры<input type="file" accept=".json,application/json" onChange={fileHandler(setServiceCentersFile)} /><small>{serviceCentersFile?.name ?? "service_centers.json"}</small></label>
-                    <label className="v1-file-field">Сотрудники<input type="file" accept=".json,application/json" onChange={fileHandler(setStaffFile)} /><small>{staffFile?.name ?? "staff.json"}</small></label>
-                    <label className="v1-file-field">Узлы доступа<input type="file" accept=".json,application/json" onChange={fileHandler(setAccessNodesFile)} /><small>{accessNodesFile?.name ?? "access_nodes.json"}</small></label>
-                    <label className="v1-file-field">Типы работ<input type="file" accept=".csv,text/csv" onChange={fileHandler(setWorkTypesFile)} /><small>{workTypesFile?.name ?? "work_types.csv"}</small></label>
-                    <label className="v1-file-field">Матрица маршрутов<input type="file" accept=".json,application/json" onChange={fileHandler(setMatrixFile)} /><small>{matrixFile?.name ?? "travel_matrix.json"}</small></label>
-                    <button className="primary-button v1-upload-button" type="button" onClick={() => void handleUploadReference()} disabled={busy}>
-                        {uploading ? <RefreshCw size={16} className="v1-spin" /> : <Upload size={16} />}
-                        {uploading ? "Загружаем..." : "Загрузить справочники и матрицу"}
-                    </button>
+                <summary>
+                    <span><Database size={17} /> Данные диспетчеризации</span>
+                    <small>{demoInfo?.city ?? "Екатеринбург"} · PostgreSQL · {demoInfo?.datasetVersion ?? "загрузка…"}</small>
+                </summary>
+                <div className="v1-demo-panel">
+                    <div className="v1-demo-intro">
+                        <strong>Оптимизация по данным из БД</strong>
+                        <p>Справочники, сотрудники, объекты и тестовые наряды загружаются с backend. Файлы для запуска оптимизации не требуются.</p>
+                    </div>
+                    <div className="v1-demo-stats">
+                        <div><strong>{demoInfo?.staffCount ?? "—"}</strong><span>сотрудников</span></div>
+                        <div><strong>{demoInfo?.serviceCenterCount ?? "—"}</strong><span>сервисных центров</span></div>
+                        <div><strong>{demoInfo?.buildingCount ?? "—"}</strong><span>объектов</span></div>
+                        <div><strong>{(demoInfo?.orderCount ?? allOrders.length) || "—"}</strong><span>тестовых нарядов</span></div>
+                    </div>
+                    <div className="v1-demo-footer">
+                        <div className="v1-demo-model-time">
+                            <span>Город: <strong>{demoInfo?.city ?? "—"}</strong></span>
+                            <span>Модельное время: <strong>{formatDateTime(modelNow)}</strong></span>
+                            <span>Часовой пояс: <strong>{demoInfo?.timezone ?? "—"}</strong></span>
+                        </div>
+                        <button className="primary-button" type="button"
+                            onClick={() => void handleBuildPlan()}
+                            disabled={busy || !demoInfo || !reference}>
+                            {building ? <RefreshCw size={16} className="v1-spin" /> : <Play size={16} />}
+                            {building ? "Оптимизируем маршруты…" : "Оптимизировать маршруты"}
+                        </button>
+                    </div>
+                    <p className="v1-setup-note">
+                        {dataLoading
+                            ? "Подготавливаем дневной набор и матрицу дорожных перемещений…"
+                            : "Матрица времени и расстояний строится по дорожной сети Екатеринбурга через OSRM и сохраняется в PostgreSQL."}
+                    </p>
                 </div>
-                <div className="v1-day-upload">
-                    <label className="v1-file-field v1-orders-file">Наряды дня / orders_train.json<input type="file" accept=".json,application/json" onChange={(event) => void handleOrdersFile(event)} /><small>{ordersFile?.name ?? "Выбрать JSON"}</small></label>
-                    <label className="v1-text-field">Модельное время now<input value={modelNow} onChange={(event) => setModelNow(event.target.value)} placeholder="2026-10-26T08:30:00+05:00" /></label>
-                    <label className="v1-text-field">Не выходят на смену<input value={absentStaffInput} onChange={(event) => setAbsentStaffInput(event.target.value)} placeholder="ST-004, ST-011" /></label>
-                    <button className="primary-button" type="button" onClick={() => void handleBuildPlan()} disabled={busy || !reference}>
-                        {building ? <RefreshCw size={16} className="v1-spin" /> : <Play size={16} />}
-                        {building ? "Строим план (до 5 мин)..." : "Загрузить день и построить план"}
-                    </button>
-                </div>
-                <p className="v1-setup-note">
-                    {reference
-                        ? "Справочники для карты сохранены в браузере (" + reference.staff.length + " сотрудников, " + reference.service_centers.length + " СЦ). "
-                        : "Справочники ещё не загружены. "}
-                    Файлы читаются в браузере и отправляются напрямую в API; повторная загрузка справочников удаляет все дни, планы и события на сервере.
-                </p>
             </details>
 
             {plan ? <Fragment>
@@ -768,14 +752,24 @@ export default function DispatcherWorkspacePage() {
                 <div className="v1-main-grid">
                     <section className="v1-card v1-map-card">
                         <div className="v1-card-heading"><div><h2><MapPinned size={17} /> Карта маршрутов</h2><p>Последовательность остановок сотрудников</p></div><span className="v1-card-count">{mapRoutes.length} маршрутов</span></div>
-                        {mapPoints.length ? <MapContainer center={[56.8389, 60.6057]} zoom={11} scrollWheelZoom className="v1-map">
+                        {demoInfo && reference ? <MapContainer center={[demoInfo.centerLat, demoInfo.centerLon]} zoom={11} scrollWheelZoom className="v1-map">
                             <TileLayer attribution="&copy; OpenStreetMap contributors" url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
-                            <MapAutoFit points={mapPoints} />
+                            <MapAutoFit points={mapPoints.length ? mapPoints : cityMapPoints} />
+                            {reference.service_centers.map((center) => <CircleMarker key={center.service_center_id}
+                                center={[center.lat, center.lon]} radius={9}
+                                pathOptions={{ color: "#0f172a", fillColor: "#f59e0b", fillOpacity: 1, weight: 2 }}>
+                                <Popup><strong>{center.name}</strong><br />{center.address}<br />Сервисный центр</Popup>
+                            </CircleMarker>)}
+                            {reference.access_nodes.flatMap((node) => node.buildings.map((building) =>
+                                <CircleMarker key={building.building_id} center={[building.lat, building.lon]} radius={3}
+                                    pathOptions={{ color: "#64748b", fillColor: "#cbd5e1", fillOpacity: 0.8, weight: 1 }}>
+                                    <Popup><strong>{building.building_id}</strong><br />{building.address}<br />Узел {node.access_node_id}</Popup>
+                                </CircleMarker>))}
                             {mapRoutes.map(({ route, points }, index) => {
                                 const color = ROUTE_COLORS[index % ROUTE_COLORS.length];
-                                const positions = points.map((point) => [point.lat, point.lon] as [number, number]);
+                                const roadPositions = roadGeometryByStaff[route.staff_id] ?? [];
                                 return <Fragment key={route.staff_id}>
-                                    {positions.length > 1 && <Polyline positions={positions} pathOptions={{ color, weight: 4, opacity: 0.75 }} />}
+                                    {roadPositions.length > 1 && <Polyline positions={roadPositions} pathOptions={{ color, weight: 4, opacity: 0.82 }} />}
                                     {points.map(({ stop, lat, lon, title }) => <CircleMarker key={route.staff_id + "-" + stop.seq + "-" + stop.location_id}
                                         center={[lat, lon]} radius={stop.order_id && selectedOrderId === stop.order_id ? 9 : 6}
                                         eventHandlers={{ click: () => setSelectedOrderId(stop.order_id ?? null) }}
@@ -784,9 +778,16 @@ export default function DispatcherWorkspacePage() {
                                     </CircleMarker>)}
                                 </Fragment>;
                             })}
-                        </MapContainer> : <div className="v1-map-empty"><MapPinned size={28} /><strong>Нет координат для отображения</strong><span>Загрузи справочники, чтобы связать location_id с адресами.</span></div>}
+                        </MapContainer> : <div className="v1-map-empty"><MapPinned size={28} /><strong>Загружаем карту Екатеринбурга</strong><span>Координаты объектов и сервисных центров появятся после ответа PostgreSQL.</span></div>}
                         <div className="v1-map-legend">{mapRoutes.map(({ route }, index) => <span key={route.staff_id}><i style={{ background: ROUTE_COLORS[index % ROUTE_COLORS.length] }} />{route.staff_id}</span>)}</div>
-                        <p className="v1-map-footnote">Линии показывают порядок посещения по прямой; геометрия дорожного маршрута в ответе API (Plan) не передаётся.</p>
+                        <p className="v1-map-footnote">
+                            {roadGeometryError
+                                ? "Не удалось загрузить дорожную геометрию: " + roadGeometryError + ". Точки остановок остаются на карте без прямых соединительных линий."
+                                : !roadGeometryReady
+                                    ? "Получаем дорожную геометрию маршрутов из OSRM…"
+                                    : "Дорожная геометрия OSRM получена для " + roadGeometryRoutesCount + " из " + mapRoutes.length +
+                                        " отображаемых маршрутов. Если линии нет, OSRM не вернул путь для этой бригады."}
+                        </p>
                     </section>
 
                     <section className="v1-card v1-gantt-card">
