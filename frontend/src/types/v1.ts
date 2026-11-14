@@ -302,3 +302,30 @@ export interface ApiLoadResult {
     status: string;
     counts: Record<string, number>;
 }
+
+export interface DemoInfoResponse {
+    city: string;
+    timezone: string;
+    centerLat: number;
+    centerLon: number;
+    today: string;
+    initialModelNow: string;
+    datasetVersion: string;
+    serviceCenterCount: number;
+    staffCount: number;
+    accessNodeCount: number;
+    buildingCount: number;
+    orderCount: number;
+}
+
+export interface DemoDayResponse {
+    city: string;
+    date: string;
+    modelNow: string;
+    datasetVersion: string;
+    matrixId: string;
+    staffCount: number;
+    buildingCount: number;
+    orderCount: number;
+    orders: Order[];
+}
