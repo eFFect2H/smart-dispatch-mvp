@@ -293,7 +293,6 @@ export default function DispatcherWorkspacePage() {
     useEffect(() => {
         if (!demoInfo) return;
         let alive = true;
-        setDataLoading(true);
         initializeDemoDay(date)
             .then(async (day) => {
                 const latest = await getPlan(date).catch(() => null);
@@ -325,6 +324,7 @@ export default function DispatcherWorkspacePage() {
     }
     function changeDate(value: string) {
         if (!value) return;
+        setDataLoading(true);
         setDate(value);
         setEventNow(value + "T08:45:00+05:00");
         setAllOrders([]);
