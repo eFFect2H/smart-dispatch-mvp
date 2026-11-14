@@ -4,6 +4,7 @@ import axios from "axios";
 export const TIMEOUTS_MS = {
     default: 120_000,
     plan: 330_000, // 300 с на расчёт + запас на сеть
+    geometry: 270_000, // OSRM возвращает геометрию отдельно для каждого маршрута
     event: 30_000,
     health: 5_000,
 } as const;
