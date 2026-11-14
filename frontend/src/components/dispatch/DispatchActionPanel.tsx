@@ -41,18 +41,18 @@ export default function DispatchActionPanel({
         <section className="v1-dispatch-actions">
             <div className="v1-dispatch-actions-heading">
                 <strong>Оперативные действия</strong>
-                <span>Событие → сервис перепланирует невыполненную часть</span>
+                <span>Сервис обновит оставшуюся часть маршрута</span>
             </div>
 
             {phase === "done" ? (
                 <div className="v1-action-warning">
                     <strong>Визит уже завершён</strong>
-                    <span>Выполненную часть плана менять нельзя (H10) — события по этому наряду не принимаются.</span>
+                    <span>Завершённый визит нельзя изменить.</span>
                 </div>
             ) : disabled ? (
                 <div className="v1-action-warning">
                     <strong>Идёт обработка события</strong>
-                    <span>Дождись ответа сервиса — события отправляются строго по очереди.</span>
+                    <span>Дождись завершения текущей операции.</span>
                 </div>
             ) : (
                 <>
@@ -67,7 +67,7 @@ export default function DispatchActionPanel({
                             <button className="secondary-button" type="button"
                                 disabled={!inProgress || !validDelay}
                                 onClick={() => onDelay(delayMin)}>
-                                <Clock3 size={14} /> VISIT_DELAYED
+                                <Clock3 size={14} /> Зафиксировать задержку
                             </button>
                         </div>
 
@@ -115,9 +115,9 @@ export default function DispatchActionPanel({
 
                     <p className="v1-action-note">
                         {state === "assigned" && phase === "planned" &&
-                            "Визит ещё не начат: доступна только отмена. Задержка и передача появляются, когда модельное время перейдёт за начало визита — сдвинь время на панели над картой. "}
+                            "Визит ещё не начат: доступна только отмена. Задержка и передача станут доступны после начала визита. "}
                         {inProgress && "Визит начат: можно сообщить о задержке или передать наряд в профильное подразделение. Отмена начатого визита не принимается. "}
-                        Переназначение на другого сотрудника сервис делает сам при риске опоздания (предупреждение LATE_RISK) — вручную оно в API не предусмотрено.
+                        При риске опоздания система может автоматически изменить распределение. Ручное переназначение пока не поддерживается.
                     </p>
                 </>
             )}

@@ -57,10 +57,7 @@ export default function PlanComparisonPanel({ comparison, onClose }: PlanCompari
                 <div>
                     <h2><GitCompare size={17} /> Изменения после перепланирования</h2>
                     <p>
-                        {comparison.before.plan_version === comparison.after.plan_version
-                            ? "Версия v" + comparison.after.plan_version + " (пересборка)"
-                            : "Версия v" + comparison.before.plan_version + " → v" + comparison.after.plan_version}
-                        {" · "}{comparison.trigger}
+                        Сводка изменений после пересчёта
                     </p>
                 </div>
                 <button type="button" className="v1-panel-close" onClick={onClose} aria-label="Скрыть сравнение">
@@ -71,10 +68,10 @@ export default function PlanComparisonPanel({ comparison, onClose }: PlanCompari
             <div className="v1-diff-metric-grid">
                 <Metric label="Запланировано визитов" before={before.visits} after={after.visits} />
                 <Metric label="Нераспределённые" before={before.unassigned} after={after.unassigned} />
-                <Metric label="Наряды в ПГП" before={before.pgpOrders} after={after.pgpOrders} />
+                <Metric label="В групповых заявках" before={before.pgpOrders} after={after.pgpOrders} />
                 <Metric label="Отменённые" before={before.cancelled} after={after.cancelled} />
                 <Metric label="Время в пути" before={before.travelSec} after={after.travelSec} duration />
-                <Metric label="Активные LATE_RISK" before={before.activeLateRisks} after={after.activeLateRisks} />
+                <Metric label="Риски опоздания" before={before.activeLateRisks} after={after.activeLateRisks} />
             </div>
 
             <div className="v1-diff-change-section">
@@ -101,10 +98,7 @@ export default function PlanComparisonPanel({ comparison, onClose }: PlanCompari
                 )}
             </div>
 
-            <p className="v1-diff-note">
-                Сравнение строится по двум версиям, находившимся в памяти страницы. API пока возвращает только последний сохранённый план;
-                после перезагрузки браузера историческое сравнение недоступно.
-            </p>
+            <p className="v1-diff-note">Сравнение доступно до перезагрузки страницы.</p>
         </section>
     );
 }

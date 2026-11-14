@@ -198,7 +198,6 @@ function GanttRow(props: {
 export default function DispatcherWorkspacePage() {
     const today = localToday();
     const [date, setDate] = useState(today);
-    const [modelNow, setModelNow] = useState(today + "T08:45:00+05:00");
     const [demoInfo, setDemoInfo] = useState<DemoInfoResponse | null>(null);
     const [reference, setReference] = useState<ReferenceData | null>(null);
     const [allOrders, setAllOrders] = useState<Order[]>([]);
@@ -222,7 +221,6 @@ export default function DispatcherWorkspacePage() {
     const [selectedOrderId, setSelectedOrderId] = useState<string | null>(null);
     const [roadGeometryByStaff, setRoadGeometryByStaff] = useState<Record<string, [number, number][]>>({});
     const [roadGeometryPlanVersion, setRoadGeometryPlanVersion] = useState<number | null>(null);
-    const [roadGeometryError, setRoadGeometryError] = useState<string | null>(null);
     const [building, setBuilding] = useState(false);
     const [sending, setSending] = useState(false);
     const [refreshing, setRefreshing] = useState(false);
@@ -259,9 +257,7 @@ export default function DispatcherWorkspacePage() {
     const planOrderIds = useMemo(() => (plan?.routes ?? []).flatMap((route) =>
         route.stops.filter((stop) => stop.type === "VISIT" && stop.order_id).map((stop) => stop.order_id as string)), [plan]);
     const planVersion = plan?.plan_version ?? null;
-    const roadGeometryReady = planVersion !== null && roadGeometryPlanVersion === planVersion;
-    const roadGeometryRoutesCount = mapRoutes.filter(({ route }) =>
-        (roadGeometryByStaff[route.staff_id]?.length ?? 0) > 1).length;
+    const roadGeometryCurrent = planVersion !== null && roadGeometryPlanVersion === planVersion;
     const busy = sending || building || dataLoading;
 
     // Состояние сервиса: GET /api/v1/health.
@@ -284,7 +280,6 @@ export default function DispatcherWorkspacePage() {
                 setDemoInfo(info);
                 setReference(loadedReference);
                 setDate(info.today);
-                setModelNow(info.initialModelNow);
                 setEventNow(info.initialModelNow);
             })
             .catch((cause) => {
@@ -308,13 +303,11 @@ export default function DispatcherWorkspacePage() {
                     next[route.staff_id] = route.points.map((point) => [point.lat, point.lon] as [number, number]);
                 });
                 setRoadGeometryByStaff(next);
-                setRoadGeometryError(null);
                 setRoadGeometryPlanVersion(response.plan_version);
             })
-            .catch((cause) => {
+            .catch(() => {
                 if (!alive) return;
                 setRoadGeometryByStaff({});
-                setRoadGeometryError(describeApiError(cause));
                 setRoadGeometryPlanVersion(planVersion);
             });
         return () => { alive = false; };
@@ -329,7 +322,6 @@ export default function DispatcherWorkspacePage() {
                 const latest = await getPlan(date).catch(() => null);
                 if (!alive) return;
                 setAllOrders(day.orders);
-                setModelNow(day.modelNow);
                 setPlan(latest);
                 setEventNow(latest?.as_of ?? day.modelNow);
                 if (latest) {
@@ -352,7 +344,8 @@ export default function DispatcherWorkspacePage() {
     }
     function resetDayState() {
         setPlan(null); setEventLog([]); setPlanComparison(null); setSelectedOrderId(null);
-        setRoadGeometryByStaff({}); setRoadGeometryPlanVersion(null); setRoadGeometryError(null);
+        setRoadGeometryByStaff({});
+        setRoadGeometryPlanVersion(null);
     }
     function changeDate(value: string) {
         if (!value) return;
@@ -379,7 +372,6 @@ export default function DispatcherWorkspacePage() {
             // Инициализация идемпотентна: существующий день с событиями и планом не заменяется.
             const demoDay = await initializeDemoDay(date);
             setAllOrders(demoDay.orders);
-            setModelNow(demoDay.modelNow);
 
             const previousPlan = plan?.date === date ? plan : null;
             const built = await generatePlan(date);
@@ -404,7 +396,6 @@ export default function DispatcherWorkspacePage() {
             const comparison = comparePlanVersions(previousPlan, latest, "Обновление из API");
             if (comparison) setPlanComparison(comparison);
             applyPlan(latest);
-            setModelNow(latest.as_of);
             setNotice("Получен план v" + latest.plan_version + " на " + date + ".");
         } catch (cause) { setError(describeApiError(cause)); }
         finally { setRefreshing(false); }
@@ -662,12 +653,12 @@ export default function DispatcherWorkspacePage() {
     return (
         <div className="v1-workspace">
             <div className="v1-page-heading">
-                <div><div className="eyebrow">API V1 · api_spec.yaml</div><h1>Рабочее место диспетчера</h1>
-                    <p>Маршруты, предупреждения о рисках и оперативное перепланирование по событиям смены.</p></div>
+                <div><div className="eyebrow">Екатеринбург</div><h1>Диспетчерская</h1>
+                    <p>Планирование маршрутов и контроль выполнения заявок.</p></div>
                 <div className="v1-heading-actions">
                     <span className={"v1-health v1-health-" + health.state}
-                        title={health.state === "down" ? "GET /api/v1/health не отвечает" : health.label}>
-                        <i /> {health.state === "ok" ? "Сервис готов" + (health.label ? " · " + health.label : "")
+                        title={health.state === "down" ? "Сервис недоступен" : "Сервис готов"}>
+                        <i /> {health.state === "ok" ? "Сервис готов"
                             : health.state === "down" ? "Сервис недоступен" : "Проверка сервиса…"}
                     </span>
                     <label className="v1-date-control"><CalendarDays size={16} />
@@ -685,12 +676,12 @@ export default function DispatcherWorkspacePage() {
             <details className="v1-setup-panel" open={!plan}>
                 <summary>
                     <span><Database size={17} /> Данные диспетчеризации</span>
-                    <small>{demoInfo?.city ?? "Екатеринбург"} · PostgreSQL · {demoInfo?.datasetVersion ?? "загрузка…"}</small>
+                    <small>{demoInfo?.city ?? "Екатеринбург"} · Данные из базы</small>
                 </summary>
                 <div className="v1-demo-panel">
                     <div className="v1-demo-intro">
-                        <strong>Оптимизация по данным из БД</strong>
-                        <p>Справочники, сотрудники, объекты и тестовые наряды загружаются с backend. Файлы для запуска оптимизации не требуются.</p>
+                        <strong>Данные для планирования</strong>
+                        <p>Бригады, объекты и заявки загружаются автоматически.</p>
                     </div>
                     <div className="v1-demo-stats">
                         <div><strong>{demoInfo?.staffCount ?? "—"}</strong><span>сотрудников</span></div>
@@ -699,11 +690,6 @@ export default function DispatcherWorkspacePage() {
                         <div><strong>{(demoInfo?.orderCount ?? allOrders.length) || "—"}</strong><span>тестовых нарядов</span></div>
                     </div>
                     <div className="v1-demo-footer">
-                        <div className="v1-demo-model-time">
-                            <span>Город: <strong>{demoInfo?.city ?? "—"}</strong></span>
-                            <span>Модельное время: <strong>{formatDateTime(modelNow)}</strong></span>
-                            <span>Часовой пояс: <strong>{demoInfo?.timezone ?? "—"}</strong></span>
-                        </div>
                         <button className="primary-button" type="button"
                             onClick={() => void handleBuildPlan()}
                             disabled={busy || !demoInfo || !reference}>
@@ -714,7 +700,7 @@ export default function DispatcherWorkspacePage() {
                     <p className="v1-setup-note">
                         {dataLoading
                             ? "Подготавливаем дневной набор и матрицу дорожных перемещений…"
-                            : "Матрица времени и расстояний строится по дорожной сети Екатеринбурга через OSRM и сохраняется в PostgreSQL."}
+                            : "Расчёт учитывает дорожные расстояния и ограничения рабочего времени."}
                     </p>
                 </div>
             </details>
@@ -722,15 +708,14 @@ export default function DispatcherWorkspacePage() {
             {plan ? <Fragment>
                 <div className="v1-kpi-grid">
                     <div className="v1-kpi"><span>Наряды в дне</span><strong>{totalOrders}</strong><small>Входной набор</small></div>
-                    <div className="v1-kpi"><span>Визиты в плане</span><strong>{plan.summary?.visits_planned ?? planOrderIds.length}</strong><small>План v{plan.plan_version}</small></div>
+                    <div className="v1-kpi"><span>Визиты в плане</span><strong>{plan.summary?.visits_planned ?? planOrderIds.length}</strong><small>Текущий план</small></div>
                     <div className="v1-kpi"><span>Нераспределённые</span><strong className={plan.unassigned.length ? "danger" : ""}>{plan.unassigned.length}</strong><small>Требуют решения</small></div>
-                    <div className="v1-kpi"><span>Риски опоздания</span><strong className={activeAlerts.length ? "warning" : ""}>{activeAlerts.length}</strong><small>Активные LATE_RISK</small></div>
+                    <div className="v1-kpi"><span>Риски опоздания</span><strong className={activeAlerts.length ? "warning" : ""}>{activeAlerts.length}</strong><small>Активные предупреждения</small></div>
                     <div className="v1-kpi"><span>В пути</span><strong>{formatDuration(plan.summary?.travel_sec_total ?? plan.routes.reduce((sum, route) => sum + (route.totals?.travel_sec ?? 0), 0))}</strong><small>Сумма по маршрутам</small></div>
                 </div>
 
                 <div className="v1-toolbar">
-                    <div className="v1-plan-meta"><span className="v1-live-dot" /> План v{plan.plan_version} · модельное время {formatDateTime(plan.as_of)}{plan.computation_ms != null ? " · расчёт " + plan.computation_ms + " мс" : ""}</div>
-                    <div className="v1-time-control" title="Модельное время для следующего события. Чтобы сервис обновил прогнозы без события, нажми «Применить»">
+                    <div className="v1-time-control" title="Время для следующего события">
                         <Clock3 size={14} />
                         <input type="time" value={isIsoWithOffset(eventNow) ? eventNow.slice(11, 16) : ""}
                             onChange={(event) => event.target.value && setEventNow(date + "T" + event.target.value + ":00" + offsetSuffix(eventNow))} />
@@ -751,9 +736,9 @@ export default function DispatcherWorkspacePage() {
 
                 <div className="v1-main-grid">
                     <section className="v1-card v1-map-card">
-                        <div className="v1-card-heading"><div><h2><MapPinned size={17} /> Карта маршрутов</h2><p>Последовательность остановок сотрудников</p></div><span className="v1-card-count">{mapRoutes.length} маршрутов</span></div>
-                        {demoInfo && reference ? <MapContainer center={[demoInfo.centerLat, demoInfo.centerLon]} zoom={11} scrollWheelZoom className="v1-map">
-                            <TileLayer attribution="&copy; OpenStreetMap contributors" url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
+                        <div className="v1-card-heading"><div><h2><MapPinned size={17} /> Карта маршрутов</h2></div><span className="v1-card-count">{mapRoutes.length} маршрутов</span></div>
+                        {demoInfo && reference ? <MapContainer center={[demoInfo.centerLat, demoInfo.centerLon]} zoom={11} scrollWheelZoom attributionControl={false} className="v1-map">
+                            <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
                             <MapAutoFit points={mapPoints.length ? mapPoints : cityMapPoints} />
                             {reference.service_centers.map((center) => <CircleMarker key={center.service_center_id}
                                 center={[center.lat, center.lon]} radius={9}
@@ -767,7 +752,7 @@ export default function DispatcherWorkspacePage() {
                                 </CircleMarker>))}
                             {mapRoutes.map(({ route, points }, index) => {
                                 const color = ROUTE_COLORS[index % ROUTE_COLORS.length];
-                                const roadPositions = roadGeometryByStaff[route.staff_id] ?? [];
+                                const roadPositions = roadGeometryCurrent ? roadGeometryByStaff[route.staff_id] ?? [] : [];
                                 return <Fragment key={route.staff_id}>
                                     {roadPositions.length > 1 && <Polyline positions={roadPositions} pathOptions={{ color, weight: 4, opacity: 0.82 }} />}
                                     {points.map(({ stop, lat, lon, title }) => <CircleMarker key={route.staff_id + "-" + stop.seq + "-" + stop.location_id}
@@ -779,19 +764,12 @@ export default function DispatcherWorkspacePage() {
                                 </Fragment>;
                             })}
                         </MapContainer> : <div className="v1-map-empty"><MapPinned size={28} /><strong>Загружаем карту Екатеринбурга</strong><span>Координаты объектов и сервисных центров появятся после ответа PostgreSQL.</span></div>}
+                        <div className="v1-map-attribution">© OpenStreetMap contributors</div>
                         <div className="v1-map-legend">{mapRoutes.map(({ route }, index) => <span key={route.staff_id}><i style={{ background: ROUTE_COLORS[index % ROUTE_COLORS.length] }} />{route.staff_id}</span>)}</div>
-                        <p className="v1-map-footnote">
-                            {roadGeometryError
-                                ? "Не удалось загрузить дорожную геометрию: " + roadGeometryError + ". Точки остановок остаются на карте без прямых соединительных линий."
-                                : !roadGeometryReady
-                                    ? "Получаем дорожную геометрию маршрутов из OSRM…"
-                                    : "Дорожная геометрия OSRM получена для " + roadGeometryRoutesCount + " из " + mapRoutes.length +
-                                        " отображаемых маршрутов. Если линии нет, OSRM не вернул путь для этой бригады."}
-                        </p>
                     </section>
 
                     <section className="v1-card v1-gantt-card">
-                        <div className="v1-card-heading"><div><h2><Activity size={17} /> Загрузка смен</h2><p>Временная шкала остановок · пунктир — модельное время</p></div><span className="v1-card-count">{filteredRoutes.length} сотрудников</span></div>
+                        <div className="v1-card-heading"><div><h2><Activity size={17} /> Загрузка смен</h2><p>Расписание остановок по сотрудникам</p></div><span className="v1-card-count">{filteredRoutes.length} сотрудников</span></div>
                         <div className="v1-gantt-scale"><div className="v1-gantt-label-spacer" /><div className="v1-gantt-ticks">
                             {[8, 10, 12, 14, 16, 18, 20, 22].map((hour) => <span key={hour} style={{ left: (((hour * 60 - TIME_START) / (TIME_END - TIME_START)) * 100) + "%" }}>{String(hour).padStart(2, "0")}:00</span>)}
                         </div></div>
@@ -804,7 +782,7 @@ export default function DispatcherWorkspacePage() {
                                 color={ROUTE_COLORS[index % ROUTE_COLORS.length]} />)}
                             {!filteredRoutes.length && <div className="v1-empty-inline">Нет маршрутов для выбранного фильтра.</div>}
                         </div>
-                        <div className="v1-gantt-legend"><span><i className="visit" /> Визит</span><span><i className="break" /> Перерыв</span><span><i className="depot" /> СЦ / RESTOCK</span><span><i className="unavailable" /> Недоступен</span></div>
+                        <div className="v1-gantt-legend"><span><i className="visit" /> Визит</span><span><i className="break" /> Перерыв</span><span><i className="depot" /> Сервисный центр / пополнение</span><span><i className="unavailable" /> Недоступен</span></div>
                     </section>
                 </div>
 
@@ -826,7 +804,7 @@ export default function DispatcherWorkspacePage() {
                     <div className="v1-tabs">
                         <button type="button" className={activePanel === "unassigned" ? "active" : ""} onClick={() => setActivePanel("unassigned")}>Нераспределённые <b>{plan.unassigned.length}</b></button>
                         <button type="button" className={activePanel === "risk" ? "active" : ""} onClick={() => setActivePanel("risk")}>Риск опоздания <b>{activeAlerts.length}</b></button>
-                        <button type="button" className={activePanel === "pgp" ? "active" : ""} onClick={() => setActivePanel("pgp")}>ПГП <b>{plan.pgp_groups.length}</b></button>
+                        <button type="button" className={activePanel === "pgp" ? "active" : ""} onClick={() => setActivePanel("pgp")}>Групповые заявки <b>{plan.pgp_groups.length}</b></button>
                         <button type="button" className={activePanel === "events" ? "active" : ""} onClick={() => setActivePanel("events")}>События <b>{eventLog.length}</b></button>
                     </div>
 
@@ -838,7 +816,7 @@ export default function DispatcherWorkspacePage() {
                             <span className="v1-issue-main"><strong>{item.order_id} · {REASON_LABELS[item.reason_code] ?? item.reason_code}</strong>
                                 <small>{item.reason_text} → {ACTION_LABELS[item.suggested_action] ?? item.suggested_action}
                                     {item.proposed_slot ? " (слот " + formatDateTime(item.proposed_slot.start) + "–" + formatTime(item.proposed_slot.end) + ")" : ""}</small></span>
-                            <span className="v1-issue-code">{item.reason_code}</span>
+                            
                         </button>)}
                         {!plan.unassigned.length && <div className="v1-empty-inline"><CheckCircle2 size={17} /> Все наряды распределены.</div>}
                     </div>}
@@ -861,7 +839,7 @@ export default function DispatcherWorkspacePage() {
                                 <small>{alert.message}{alert.applied ? " · предложение применено" : ""}</small></span>
                             <span className="v1-issue-code">{formatTime(alert.created_at)}</span>
                         </button>)}
-                        {!lateRiskAlerts.length && <div className="v1-empty-inline"><CheckCircle2 size={17} /> Предупреждений LATE_RISK нет.</div>}
+                        {!lateRiskAlerts.length && <div className="v1-empty-inline"><CheckCircle2 size={17} /> Предупреждений о риске опоздания нет.</div>}
                     </div>}
 
                     {activePanel === "pgp" && <div className="v1-issue-list">
@@ -879,22 +857,21 @@ export default function DispatcherWorkspacePage() {
                         {eventLog.slice().reverse().map((entry) => <div className="v1-event-history-row" key={entry.event.event_id}>
                             <span className="v1-event-dot" style={entry.error ? { background: "#dc2626" } : undefined} />
                             <div><strong>{EVENT_LABELS[entry.event.type] || entry.event.type}</strong>
-                                <small>{("order_id" in entry.event ? entry.event.order_id : "staff_id" in entry.event ? entry.event.staff_id : entry.event.event_id)} · {formatDateTime(entry.event.timestamp)} · {entry.elapsed_ms} мс{entry.elapsed_ms > EVENT_LIMIT_MS ? " (дольше 10 с!)" : ""}</small>
+                                <small>{("order_id" in entry.event ? entry.event.order_id : "staff_id" in entry.event ? entry.event.staff_id : entry.event.event_id)} · {formatDateTime(entry.event.timestamp)}</small>
                                 {entry.error && <small className="v1-event-error">{entry.error}</small>}</div>
-                            <code>{entry.result ? "v" + entry.result.plan_version : "✕"}</code>
                         </div>)}
-                        {!eventLog.length && <div className="v1-empty-inline">События из этого сеанса ещё не отправлялись (журнал хранится в браузере).</div>}
+                        {!eventLog.length && <div className="v1-empty-inline">Пока нет событий.</div>}
                     </div>}
                 </section>
 
                 <section className="v1-card v1-event-card">
                     <div className="v1-card-heading"><div><h2><Send size={17} /> Зарегистрировать событие</h2>
-                        <p>Сервис сам перепланирует невыполненную часть плана; интерфейс затем запрашивает актуальный план.</p></div><span className="v1-card-count">POST /events → GET /plan</span></div>
+                        <p>Изменения в течение рабочего дня</p></div></div>
                     <div className="v1-event-form">
                         <label className="v1-text-field">Тип события<select value={eventType} onChange={(event) => setEventType(event.target.value as EventType)}>
                             {Object.entries(EVENT_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
                         </select></label>
-                        <label className="v1-text-field">Время события (ISO-8601)<input value={eventNow} onChange={(event) => setEventNow(event.target.value)} /></label>
+                        <label className="v1-text-field">Время события<input value={eventNow} onChange={(event) => setEventNow(event.target.value)} /></label>
                         {["ORDER_CANCELLED", "VISIT_DELAYED", "ORDER_TRANSFERRED"].includes(eventType) &&
                             <label className="v1-text-field">Наряд<input list="v1-plan-orders" value={eventOrderId} onChange={(event) => setEventOrderId(event.target.value)} placeholder="ORD-20261026-0001" /></label>}
                         {eventType === "STAFF_UNAVAILABLE" && <Fragment>
@@ -925,7 +902,7 @@ export default function DispatcherWorkspacePage() {
                         </button>
                     </div>
                     <datalist id="v1-plan-orders">{planOrderIds.map((id) => <option key={id} value={id} />)}</datalist>
-                    <p className="v1-setup-note"><AlertTriangle size={14} /> Задержка и передача принимаются только для начатого визита (start ≤ времени события), отмена — только для ещё не начатого. Время события не может быть раньше модельного времени плана.</p>
+                    <p className="v1-setup-note"><AlertTriangle size={14} /> Задержку и передачу можно указать после начала визита. Отменить можно только визит, который ещё не начался.</p>
 
                     <div className="v1-scenario">
                         <label className="v1-file-field">Сценарий событий<input type="file" accept=".json,application/json" onChange={fileHandler(setScenarioFile)} /><small>{scenarioFile?.name ?? "events_example.json"}</small></label>
@@ -938,11 +915,11 @@ export default function DispatcherWorkspacePage() {
                                 <ListVideo size={15} /> Прогнать сценарий
                             </button>
                         )}
-                        <small>Как оркестратор: события по возрастанию времени, триггеры (задержка/передача) разворачиваются по текущему плану.</small>
+                        <small>События будут обработаны в порядке времени.</small>
                     </div>
                 </section>
             </Fragment> : <div className="v1-empty-workspace"><Route size={32} /><h2>План дня ещё не загружен</h2>
-                <p>Загрузи справочники и матрицу, выбери файл нарядов и нажми «Загрузить день и построить план». Здесь появятся карта, график смен и контрольные списки.</p></div>}
+                <p>Данные уже загружены из базы. Нажми «Оптимизировать маршруты», чтобы построить план на выбранный день.</p></div>}
         </div>
     );
 }
