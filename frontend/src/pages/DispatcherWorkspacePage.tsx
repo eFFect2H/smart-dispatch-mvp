@@ -258,6 +258,7 @@ export default function DispatcherWorkspacePage() {
     }));
     const planOrderIds = useMemo(() => (plan?.routes ?? []).flatMap((route) =>
         route.stops.filter((stop) => stop.type === "VISIT" && stop.order_id).map((stop) => stop.order_id as string)), [plan]);
+    const planVersion = plan?.plan_version ?? null;
     const roadGeometryReady = planVersion !== null && roadGeometryPlanVersion === planVersion;
     const roadGeometryRoutesCount = mapRoutes.filter(({ route }) =>
         (roadGeometryByStaff[route.staff_id]?.length ?? 0) > 1).length;
@@ -294,8 +295,6 @@ export default function DispatcherWorkspacePage() {
             });
         return () => { alive = false; };
     }, []);
-
-    const planVersion = plan?.plan_version ?? null;
 
     // Геометрия запрашивается отдельно от оптимизации и только для отображения линий на карте.
     useEffect(() => {
