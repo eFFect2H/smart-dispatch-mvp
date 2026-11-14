@@ -304,3 +304,24 @@ E3 не добавляет новых endpoint или миграций БД. Р�
 
 Проверки frontend: npm ci, npm run build, npm run lint из каталога frontend.
 
+
+
+## Stage EKB — DB-backed demo for Yekaterinburg
+
+The dispatcher workspace now uses the database as its only source for the initial optimization dataset:
+
+- Flyway V6 installs a Yekaterinburg demo dataset in PostgreSQL: 3 service centers, 8 staff members, 22 access nodes/buildings, 8 work types and 34 orders.
+- The legacy `/teams` and `/requests` screens receive matching Yekaterinburg sample records (8 teams and 32 requests).
+- `GET /api/v1/demo` returns the active city, timezone, map center and sample-data counts.
+- `GET /api/v1/reference` returns the stored V1 reference snapshot.
+- `POST /api/v1/demo/days/{date}/initialize` creates a day snapshot from the database template. It is idempotent and does not overwrite an existing day, plan or event history.
+- On first day initialization, the backend asks OSRM for a 25-point driving duration/distance matrix covering the three service centers and 22 buildings, then persists that matrix in PostgreSQL. Subsequent day initialization reuses it while the dataset version and point IDs remain unchanged.
+- The route optimization panel no longer asks users to select reference, matrix or order JSON/CSV files. It loads the reference and day from PostgreSQL and starts optimization against those persisted records.
+- The map opens on Yekaterinburg and shows service centers/buildings. The optimizer uses the OSRM road matrix; route polylines on the current plan response remain schematic connections between stops because the V1 plan response does not yet contain road geometry.
+- The coordinates and addresses in this MVP are explicitly demo locations around Yekaterinburg, not verified geocodes for real customer buildings.
+
+**Migration note:** V6 intentionally replaces the previous one-city V1 demo reference/matrix/day/event snapshots with the Yekaterinburg dataset. Do not apply this migration to a production database containing real dispatch data.
+
+For backend verification run `mvn -B -ntp clean test`. The backend GitHub Actions workflow additionally starts PostgreSQL, applies Flyway migrations and checks `/api/v1/demo` and `/api/v1/reference`.
+
+For frontend verification run `npm ci`, `npm run build` and `npm run lint` from `frontend/`.
