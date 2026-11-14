@@ -469,7 +469,6 @@ export default function RequestsPage() {
                         <table className="data-table requests-table">
                             <thead>
                             <tr>
-                                <th>ID</th>
                                 <th>Заявка</th>
                                 <th>Адрес</th>
                                 <th>Временное окно</th>
@@ -482,7 +481,6 @@ export default function RequestsPage() {
                             <tbody>
                             {filteredRequests.map((request) => (
                                 <tr key={request.id}>
-                                    <td className="request-id-cell">#{request.id}</td>
 
                                     <td>
                                         <div className="request-title">{request.title}</div>

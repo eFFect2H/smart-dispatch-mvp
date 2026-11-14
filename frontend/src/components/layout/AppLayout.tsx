@@ -1,5 +1,4 @@
 import { Outlet } from "react-router-dom";
-import { Bell, Search } from "lucide-react";
 import Sidebar from "./Sidebar";
 
 export default function AppLayout() {
@@ -16,15 +15,6 @@ export default function AppLayout() {
                         </div>
                     </div>
 
-                    <div className="topbar-actions">
-                        <button className="icon-button" aria-label="Поиск">
-                            <Search size={19} />
-                        </button>
-                        <button className="icon-button" aria-label="Уведомления">
-                            <Bell size={19} />
-                        </button>
-                        <div className="avatar">Д</div>
-                    </div>
                 </header>
 
                 <div className="page-content">

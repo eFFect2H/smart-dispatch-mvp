@@ -156,6 +156,9 @@ public class DispatchEventService {
                 requireStaffId(request.targetStaffId(), "target_staff_id");
                 requireKnownStaff(request.targetStaffId(), reference);
             }
+            case TIME_TICK -> {
+                // Дополнительные поля не требуются.
+            }
         }
     }
 

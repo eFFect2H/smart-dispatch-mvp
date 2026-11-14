@@ -15,7 +15,7 @@ public final class EventDtos {
     private EventDtos() { }
 
     public enum EventType {
-        NEW_ORDER, ORDER_CANCELLED, VISIT_DELAYED, STAFF_UNAVAILABLE, ORDER_TRANSFERRED
+        NEW_ORDER, ORDER_CANCELLED, VISIT_DELAYED, STAFF_UNAVAILABLE, ORDER_TRANSFERRED, TIME_TICK
     }
 
     @JsonNaming(PropertyNamingStrategies.SnakeCaseStrategy.class)
