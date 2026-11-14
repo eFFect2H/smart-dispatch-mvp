@@ -187,6 +187,11 @@ public class DemoDataService {
         ArrayNode orders = objectMapper.createArrayNode();
         sourceOrders.forEach(source -> {
             ObjectNode order = source.deepCopy();
+            order.put("order_id", rebaseOrderId(order.path("order_id").asText(), date));
+            if (!order.path("previous_order_id").isMissingNode()
+                    && !order.path("previous_order_id").isNull()) {
+                order.put("previous_order_id", rebaseOrderId(order.path("previous_order_id").asText(), date));
+            }
             order.put("registered_at", rebaseTimestamp(order.path("registered_at"), date));
             ObjectNode slot = (ObjectNode) order.path("slot");
             slot.put("start", rebaseTimestamp(slot.path("start"), date));
@@ -207,6 +212,14 @@ public class DemoDataService {
         } catch (JsonProcessingException ex) {
             throw new IllegalStateException("Could not construct the Yekaterinburg demo day " + date, ex);
         }
+    }
+
+    private String rebaseOrderId(String orderId, LocalDate date) {
+        int separator = orderId.lastIndexOf('-');
+        if (!orderId.startsWith("ORD-") || separator < 4 || separator == orderId.length() - 1) {
+            throw new IllegalStateException("Invalid order_id in database demo template: " + orderId);
+        }
+        return "ORD-" + date.toString().replace("-", "") + orderId.substring(separator);
     }
 
     private String rebaseTimestamp(JsonNode value, LocalDate date) {
