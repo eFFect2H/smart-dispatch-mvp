@@ -8,7 +8,7 @@ import { CircleMarker, MapContainer, Polyline, Popup, TileLayer, useMap } from "
 import "leaflet/dist/leaflet.css";
 
 import {
-    describeApiError, generatePlan, getDemoInfo, getHealth, getPlan, getReference,
+    describeApiError, generatePlan, getDemoInfo, getHealth, getPlan, getReference, getRouteGeometries,
     initializeDemoDay, sendEvent,
 } from "../api/v1Dispatch";
 import PlanComparisonPanel from "../components/dispatch/PlanComparisonPanel";
@@ -220,6 +220,9 @@ export default function DispatcherWorkspacePage() {
     const [staffFilter, setStaffFilter] = useState("ALL");
     const [activePanel, setActivePanel] = useState<"unassigned" | "risk" | "pgp" | "events">("unassigned");
     const [selectedOrderId, setSelectedOrderId] = useState<string | null>(null);
+    const [roadGeometryByStaff, setRoadGeometryByStaff] = useState<Record<string, [number, number][]>>({});
+    const [roadGeometryPlanVersion, setRoadGeometryPlanVersion] = useState<number | null>(null);
+    const [roadGeometryError, setRoadGeometryError] = useState<string | null>(null);
     const [building, setBuilding] = useState(false);
     const [sending, setSending] = useState(false);
     const [refreshing, setRefreshing] = useState(false);
@@ -255,6 +258,9 @@ export default function DispatcherWorkspacePage() {
     }));
     const planOrderIds = useMemo(() => (plan?.routes ?? []).flatMap((route) =>
         route.stops.filter((stop) => stop.type === "VISIT" && stop.order_id).map((stop) => stop.order_id as string)), [plan]);
+    const roadGeometryReady = planVersion !== null && roadGeometryPlanVersion === planVersion;
+    const roadGeometryRoutesCount = mapRoutes.filter(({ route }) =>
+        (roadGeometryByStaff[route.staff_id]?.length ?? 0) > 1).length;
     const busy = sending || building || dataLoading;
 
     // Состояние сервиса: GET /api/v1/health.
@@ -289,6 +295,32 @@ export default function DispatcherWorkspacePage() {
         return () => { alive = false; };
     }, []);
 
+    const planVersion = plan?.plan_version ?? null;
+
+    // Геометрия запрашивается отдельно от оптимизации и только для отображения линий на карте.
+    useEffect(() => {
+        if (planVersion === null) return;
+        let alive = true;
+        getRouteGeometries(date)
+            .then((response) => {
+                if (!alive || response.plan_version !== planVersion) return;
+                const next: Record<string, [number, number][]> = {};
+                response.routes.forEach((route) => {
+                    next[route.staff_id] = route.points.map((point) => [point.lat, point.lon]);
+                });
+                setRoadGeometryByStaff(next);
+                setRoadGeometryError(null);
+                setRoadGeometryPlanVersion(response.plan_version);
+            })
+            .catch((cause) => {
+                if (!alive) return;
+                setRoadGeometryByStaff({});
+                setRoadGeometryError(describeApiError(cause));
+                setRoadGeometryPlanVersion(planVersion);
+            });
+        return () => { alive = false; };
+    }, [date, planVersion]);
+
     // День создаётся из шаблона в PostgreSQL; повторный вызов не перезаписывает события или план.
     useEffect(() => {
         if (!demoInfo) return;
@@ -321,6 +353,7 @@ export default function DispatcherWorkspacePage() {
     }
     function resetDayState() {
         setPlan(null); setEventLog([]); setPlanComparison(null); setSelectedOrderId(null);
+        setRoadGeometryByStaff({}); setRoadGeometryPlanVersion(null); setRoadGeometryError(null);
     }
     function changeDate(value: string) {
         if (!value) return;
@@ -735,9 +768,9 @@ export default function DispatcherWorkspacePage() {
                                 </CircleMarker>))}
                             {mapRoutes.map(({ route, points }, index) => {
                                 const color = ROUTE_COLORS[index % ROUTE_COLORS.length];
-                                const positions = points.map((point) => [point.lat, point.lon] as [number, number]);
+                                const roadPositions = roadGeometryByStaff[route.staff_id] ?? [];
                                 return <Fragment key={route.staff_id}>
-                                    {positions.length > 1 && <Polyline positions={positions} pathOptions={{ color, weight: 4, opacity: 0.75 }} />}
+                                    {roadPositions.length > 1 && <Polyline positions={roadPositions} pathOptions={{ color, weight: 4, opacity: 0.82 }} />}
                                     {points.map(({ stop, lat, lon, title }) => <CircleMarker key={route.staff_id + "-" + stop.seq + "-" + stop.location_id}
                                         center={[lat, lon]} radius={stop.order_id && selectedOrderId === stop.order_id ? 9 : 6}
                                         eventHandlers={{ click: () => setSelectedOrderId(stop.order_id ?? null) }}
@@ -748,7 +781,14 @@ export default function DispatcherWorkspacePage() {
                             })}
                         </MapContainer> : <div className="v1-map-empty"><MapPinned size={28} /><strong>Загружаем карту Екатеринбурга</strong><span>Координаты объектов и сервисных центров появятся после ответа PostgreSQL.</span></div>}
                         <div className="v1-map-legend">{mapRoutes.map(({ route }, index) => <span key={route.staff_id}><i style={{ background: ROUTE_COLORS[index % ROUTE_COLORS.length] }} />{route.staff_id}</span>)}</div>
-                        <p className="v1-map-footnote">Оптимизатор использует дорожную матрицу OSRM для Екатеринбурга. Линии на карте схематично соединяют остановки в порядке посещения, а не отображают точную геометрию дорог.</p>
+                        <p className="v1-map-footnote">
+                            {roadGeometryError
+                                ? "Не удалось загрузить дорожную геометрию: " + roadGeometryError + ". Точки остановок остаются на карте без прямых соединительных линий."
+                                : !roadGeometryReady
+                                    ? "Получаем дорожную геометрию маршрутов из OSRM…"
+                                    : "Дорожная геометрия OSRM получена для " + roadGeometryRoutesCount + " из " + mapRoutes.length +
+                                        " отображаемых маршрутов. Если линии нет, OSRM не вернул путь для этой бригады."}
+                        </p>
                     </section>
 
                     <section className="v1-card v1-gantt-card">
