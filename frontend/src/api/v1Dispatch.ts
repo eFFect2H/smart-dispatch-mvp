@@ -10,6 +10,7 @@ import type {
     DemoDayResponse,
     PlanResponse,
     ReferenceData,
+    RouteGeometryResponse,
 } from "../types/v1";
 
 export async function getDemoInfo(): Promise<DemoInfoResponse> {
@@ -40,6 +41,13 @@ export async function generatePlan(date: string, timeLimitSec = 300): Promise<Pl
         { timeout: TIMEOUTS_MS.plan },
     );
     return response.data as PlanResponse;
+}
+
+export async function getRouteGeometries(date: string): Promise<RouteGeometryResponse> {
+    const response = await api.get(`/api/v1/days/${date}/plan/geometry`, {
+        timeout: TIMEOUTS_MS.geometry,
+    });
+    return response.data as RouteGeometryResponse;
 }
 
 export async function getPlan(date: string): Promise<PlanResponse> {
