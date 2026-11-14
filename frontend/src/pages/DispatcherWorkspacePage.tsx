@@ -1,35 +1,59 @@
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, CSSProperties } from "react";
 import {
-    Activity, AlertTriangle, CalendarDays, CheckCircle2, Clock3, Filter,
-    Layers3, MapPinned, Play, RefreshCw, Route, Send, Upload, UserX, XCircle,
+    Activity, AlertTriangle, CalendarDays, CheckCircle2, Clock3, Filter, Layers3,
+    ListVideo, MapPinned, Play, RefreshCw, Route, Send, Square, Upload, UserX, XCircle,
 } from "lucide-react";
 import { CircleMarker, MapContainer, Polyline, Popup, TileLayer, useMap } from "react-leaflet";
 import "leaflet/dist/leaflet.css";
 
 import {
-    appendEvent, generatePlan, getEventHistory, getPlan, uploadDay,
+    describeApiError, generatePlan, getHealth, getPlan, sendEvent, uploadDay,
     uploadReference, uploadTravelMatrix,
 } from "../api/v1Dispatch";
 import PlanComparisonPanel from "../components/dispatch/PlanComparisonPanel";
 import SelectedOrderDetails from "../components/dispatch/SelectedOrderDetails";
 import { comparePlanVersions } from "../utils/planInsights";
 import type { PlanComparison } from "../utils/planInsights";
+import {
+    addMinutes, findVisit, isIsoWithOffset, newEventId, offsetMinutes,
+    triggerFireTime, triggerToEvent, validateScenario,
+} from "../utils/events";
+import { parseWorkTypes } from "../utils/workTypesCsv";
 import type {
-    AccessNode, DayInput, EventHistory, EventRequest, EventType, Order,
-    PlanAlert, PlanResponse, PlanRoute, PlanStop, ReferenceData, ServiceCenter,
-    StaffMember, TravelMatrix, UnassignedOrder,
+    AccessNode, CancelReason, DayInput, DispatchEvent, EventLogEntry, EventType, Order,
+    PlanAlert, PlanResponse, PlanRoute, PlanStop, ReferenceData, ScenarioTrigger,
+    ServiceCenter, StaffMember, TransferTarget, TravelMatrix, UnassignedOrder, UnavailableReason,
 } from "../types/v1";
 
 const ROUTE_COLORS = ["#3563e9", "#0d9488", "#d97706", "#be4b8a", "#6477d7", "#7c5ce7"];
 const TIME_START = 8 * 60;
 const TIME_END = 22 * 60;
+const EVENT_LIMIT_MS = 10_000;
+const REFERENCE_STORAGE_KEY = "smart-dispatch.reference.v1";
+
 const EVENT_LABELS: Record<EventType, string> = {
     NEW_ORDER: "Новый наряд",
     ORDER_CANCELLED: "Отмена наряда",
     VISIT_DELAYED: "Задержка визита",
+    ORDER_TRANSFERRED: "Передача в профильное подразделение",
     STAFF_UNAVAILABLE: "Сотрудник недоступен",
-    ORDER_TRANSFERRED: "Передача другому сотруднику",
+    TIME_TICK: "Ход времени",
+};
+const REASON_LABELS: Record<string, string> = {
+    NO_QUALIFIED_STAFF: "Нет сотрудника с нужным допуском",
+    NO_SHIFT_TIME: "Не хватает времени смены",
+    SLOT_UNREACHABLE: "Не успевают в слот",
+    NO_EQUIPMENT: "Нет нужного АО",
+    STAFF_UNAVAILABLE: "Исполнитель выбыл",
+    OTHER: "Другая причина",
+};
+const ACTION_LABELS: Record<string, string> = {
+    RESCHEDULE: "Перенести визит",
+    REASSIGN: "Передать другому сотруднику",
+    ESCALATE: "Решение диспетчера",
+    TRANSFER_TO_STATION: "Передать в станционное подразделение",
+    NONE: "—",
 };
 
 function localToday(): string {
@@ -57,6 +81,12 @@ function formatDateTime(value?: string | null): string {
     return value ? value.slice(8, 10) + "." + value.slice(5, 7) + " " + formatTime(value) : "—";
 }
 function offsetDate(value: string): string { return value.slice(0, 10); }
+function offsetSuffix(iso: string): string {
+    const total = offsetMinutes(iso);
+    const sign = total < 0 ? "-" : "+";
+    const abs = Math.abs(total);
+    return sign + String(Math.floor(abs / 60)).padStart(2, "0") + ":" + String(abs % 60).padStart(2, "0");
+}
 
 function readFile(file: File): Promise<string> {
     return new Promise((resolve, reject) => {
@@ -81,80 +111,11 @@ function unwrapArray<T>(value: unknown, key: string, fileName: string): T[] {
     if (!Array.isArray(candidate)) throw new Error(fileName + ": ожидался массив или объект с полем " + key);
     return candidate as T[];
 }
-function parseCsv(text: string): string[][] {
-    const rows: string[][] = [];
-    let row: string[] = [];
-    let cell = "";
-    let quoted = false;
-    for (let i = 0; i < text.length; i += 1) {
-        const char = text[i];
-        if (quoted) {
-            if (char === '"' && text[i + 1] === '"') { cell += '"'; i += 1; }
-            else if (char === '"') quoted = false;
-            else cell += char;
-        } else if (char === '"' && cell.length === 0) quoted = true;
-        else if (char === ",") { row.push(cell); cell = ""; }
-        else if (char === "\n") {
-            row.push(cell.replace(/\r$/, ""));
-            if (row.some((value) => value.length > 0)) rows.push(row);
-            row = []; cell = "";
-        } else cell += char;
-    }
-    if (quoted) throw new Error("work_types.csv: незакрытое поле в кавычках");
-    if (cell.length || row.length) {
-        row.push(cell.replace(/\r$/, ""));
-        if (row.some((value) => value.length > 0)) rows.push(row);
-    }
-    return rows;
-}
-function parseWorkTypes(text: string): ReferenceData["work_types"] {
-    const rows = parseCsv(text);
-    if (rows.length < 2) throw new Error("work_types.csv: нет строк типов работ");
-    const headers = rows[0].map((value) => value.trim().replace(/^\uFEFF/, ""));
-    const required = ["code", "name", "profiles", "duration_min", "max_start_delay_min",
-        "deadline_kind", "deadline_value", "repeat_deadline_value", "pgp_relevant"];
-    const missing = required.filter((name) => !headers.includes(name));
-    if (missing.length) throw new Error("work_types.csv: отсутствуют столбцы " + missing.join(", "));
-    return rows.slice(1).map((row, index) => {
-        const get = (name: string) => (row[headers.indexOf(name)] ?? "").trim();
-        const integer = (name: string) => {
-            const number = Number(get(name));
-            if (!Number.isInteger(number)) throw new Error("work_types.csv, строка " + (index + 2) + ": " + name + " должен быть целым числом");
-            return number;
-        };
-        const profiles = get("profiles").split("|").map((value) => value.trim()).filter(Boolean);
-        if (!profiles.length) throw new Error("work_types.csv, строка " + (index + 2) + ": profiles пуст");
-        const pgp = get("pgp_relevant").toLowerCase();
-        if (pgp !== "true" && pgp !== "false") throw new Error("work_types.csv, строка " + (index + 2) + ": pgp_relevant должен быть true/false");
-        return {
-            code: get("code"), name: get("name"), profiles: profiles as ("INSTALL" | "LTP3")[],
-            duration_min: integer("duration_min"),
-            max_start_delay_min: get("max_start_delay_min") ? integer("max_start_delay_min") : null,
-            deadline_kind: get("deadline_kind") as "SLOT" | "HOURS" | "WORKING_DAYS",
-            deadline_value: integer("deadline_value"), repeat_deadline_value: integer("repeat_deadline_value"),
-            pgp_relevant: pgp === "true",
-        };
-    });
-}
-function getErrorMessage(error: unknown): string {
-    if (typeof error === "object" && error !== null && "response" in error) {
-        const response = (error as { response?: { data?: unknown; status?: number } }).response;
-        const data = response?.data;
-        if (typeof data === "string") return data;
-        if (typeof data === "object" && data !== null) {
-            const body = data as { error?: { code?: string; message?: string }; message?: string };
-            if (body.error?.message) return (body.error.code ?? "API_ERROR") + ": " + body.error.message;
-            if (body.message) return body.message;
-        }
-        if (response?.status) return "Ошибка API: HTTP " + response.status;
-    }
-    return error instanceof Error ? error.message : "Произошла непредвиденная ошибка.";
-}
 function selectDayOrders(allOrders: Order[], date: string, modelNow: string): Order[] {
-    const nowMs = Date.parse(modelNow);
-    if (!Number.isFinite(nowMs) || !/[+-]\d{2}:\d{2}$/.test(modelNow)) {
-        throw new Error("Укажи model_now в формате ISO-8601 со смещением, например 2026-10-26T08:00:00+05:00");
+    if (!isIsoWithOffset(modelNow)) {
+        throw new Error("Укажи now в формате ISO-8601 со смещением, например 2026-10-26T08:30:00+05:00");
     }
+    const nowMs = Date.parse(modelNow);
     return allOrders.filter((order) => offsetDate(order.slot?.start ?? "") === date &&
         Date.parse(order.registered_at) <= nowMs);
 }
@@ -166,6 +127,21 @@ function locationIndex(reference: ReferenceData | null): Map<string, { lat: numb
     reference.access_nodes.forEach((node: AccessNode) => node.buildings.forEach((building) =>
         result.set(building.building_id, { lat: building.lat, lon: building.lon, title: building.address })));
     return result;
+}
+function loadStoredReference(): ReferenceData | null {
+    try {
+        const raw = localStorage.getItem(REFERENCE_STORAGE_KEY);
+        return raw ? JSON.parse(raw) as ReferenceData : null;
+    } catch {
+        return null;
+    }
+}
+function storeReference(reference: ReferenceData) {
+    try {
+        localStorage.setItem(REFERENCE_STORAGE_KEY, JSON.stringify(reference));
+    } catch {
+        // Хранилище недоступно или переполнено — карта просто потребует повторной загрузки справочников.
+    }
 }
 
 function MapAutoFit({ points }: { points: [number, number][] }) {
@@ -179,18 +155,25 @@ function MapAutoFit({ points }: { points: [number, number][] }) {
 function StaffLabel({ staffId, staff }: { staffId: string; staff?: StaffMember }) {
     return <span>{staff?.display_name || staffId}</span>;
 }
+function trackPercent(minute: number): string {
+    return (((Math.min(TIME_END, Math.max(TIME_START, minute)) - TIME_START) / (TIME_END - TIME_START)) * 100) + "%";
+}
+
 function GanttRow(props: {
     route: PlanRoute; staff?: StaffMember; selectedOrderId: string | null;
     onSelectOrder: (id: string | null) => void; color: string;
-    onMarkUnavailable: (staffId: string) => void; busy: boolean;
+    onMarkUnavailable: (staffId: string) => void; busy: boolean; nowMinute: number | null;
 }) {
     const [confirmUnavailable, setConfirmUnavailable] = useState(false);
     const staffStart = minuteOfDay(props.staff?.shift.start) ?? TIME_START;
     const staffEnd = minuteOfDay(props.staff?.shift.end) ?? TIME_END;
     const shiftStyle = {
-        left: (((staffStart - TIME_START) / (TIME_END - TIME_START)) * 100) + "%",
+        left: trackPercent(staffStart),
         width: (((staffEnd - staffStart) / (TIME_END - TIME_START)) * 100) + "%",
     } as CSSProperties;
+    const unavailableFrom = minuteOfDay(props.route.unavailable_from);
+    const unavailableTo = minuteOfDay(props.route.unavailable_until) ?? staffEnd;
+    const unavailable = props.route.status === "UNAVAILABLE" && unavailableFrom !== null;
     return (
         <div className="v1-gantt-row">
             <div className="v1-gantt-person">
@@ -198,30 +181,30 @@ function GanttRow(props: {
                 <span><strong><StaffLabel staffId={props.route.staff_id} staff={props.staff} /></strong><small>{props.route.staff_id}</small></span>
                 {confirmUnavailable ? (
                     <span className="v1-staff-confirm">
-                        <button type="button" className="v1-staff-confirm-yes"
-                            disabled={props.busy}
-                            onClick={() => {
-                                setConfirmUnavailable(false);
-                                props.onMarkUnavailable(props.route.staff_id);
-                            }}>Да</button>
+                        <button type="button" className="v1-staff-confirm-yes" disabled={props.busy}
+                            onClick={() => { setConfirmUnavailable(false); props.onMarkUnavailable(props.route.staff_id); }}>Да</button>
                         <button type="button" className="v1-staff-confirm-no"
                             onClick={() => setConfirmUnavailable(false)}>Нет</button>
                     </span>
                 ) : (
-                    <button
-                        type="button"
-                        className="v1-staff-unavailable-button"
-                        title={props.route.status === "UNAVAILABLE" ? "Сотрудник уже отмечен как недоступный" : "Отметить сотрудника недоступным до конца дня"}
+                    <button type="button" className="v1-staff-unavailable-button"
+                        title={props.route.status === "UNAVAILABLE" ? "Сотрудник уже отмечен как недоступный" : "Отметить сотрудника недоступным до конца смены"}
                         aria-label={"Отметить " + props.route.staff_id + " недоступным"}
                         disabled={props.busy || props.route.status === "UNAVAILABLE"}
-                        onClick={() => setConfirmUnavailable(true)}
-                    >
+                        onClick={() => setConfirmUnavailable(true)}>
                         <UserX size={13} />
                     </button>
                 )}
             </div>
             <div className="v1-gantt-track">
                 <div className="v1-gantt-shift" style={shiftStyle} />
+                {unavailable && unavailableFrom !== null && <div className="v1-gantt-unavailable"
+                    title={"Недоступен с " + formatTime(props.route.unavailable_from) +
+                        (props.route.unavailable_until ? " до " + formatTime(props.route.unavailable_until) : " до конца смены")}
+                    style={{
+                        left: trackPercent(unavailableFrom),
+                        width: (((Math.max(unavailableTo, unavailableFrom) - unavailableFrom) / (TIME_END - TIME_START)) * 100) + "%",
+                    }} />}
                 {props.route.stops.map((stop: PlanStop) => {
                     const start = minuteOfDay(stop.start) ?? minuteOfDay(stop.arrival);
                     const end = minuteOfDay(stop.end) ?? start;
@@ -229,7 +212,7 @@ function GanttRow(props: {
                     const clippedStart = Math.max(TIME_START, start);
                     const clippedEnd = Math.min(TIME_END, Math.max(end, start + 3));
                     const style = {
-                        left: (((clippedStart - TIME_START) / (TIME_END - TIME_START)) * 100) + "%",
+                        left: trackPercent(clippedStart),
                         width: Math.max(0.5, ((clippedEnd - clippedStart) / (TIME_END - TIME_START)) * 100) + "%",
                         backgroundColor: stop.type === "VISIT" ? props.color : stop.type === "BREAK" ? "#94a3b8" : "#cbd5e1",
                     } as CSSProperties;
@@ -239,6 +222,7 @@ function GanttRow(props: {
                         title={stop.type + (stop.order_id ? " · " + stop.order_id : "") + " · " + formatTime(stop.start) + "–" + formatTime(stop.end)}
                         onClick={() => props.onSelectOrder(stop.order_id ?? null)} />;
                 })}
+                {props.nowMinute !== null && <div className="v1-gantt-now" style={{ left: trackPercent(props.nowMinute) }} />}
             </div>
         </div>
     );
@@ -247,25 +231,29 @@ function GanttRow(props: {
 export default function DispatcherWorkspacePage() {
     const today = localToday();
     const [date, setDate] = useState(today);
-    const [modelNow, setModelNow] = useState(today + "T08:00:00+05:00");
+    const [modelNow, setModelNow] = useState(today + "T08:30:00+05:00");
     const [serviceCentersFile, setServiceCentersFile] = useState<File | null>(null);
     const [staffFile, setStaffFile] = useState<File | null>(null);
     const [accessNodesFile, setAccessNodesFile] = useState<File | null>(null);
     const [workTypesFile, setWorkTypesFile] = useState<File | null>(null);
     const [matrixFile, setMatrixFile] = useState<File | null>(null);
     const [ordersFile, setOrdersFile] = useState<File | null>(null);
-    const [reference, setReference] = useState<ReferenceData | null>(null);
+    const [scenarioFile, setScenarioFile] = useState<File | null>(null);
+    const [reference, setReference] = useState<ReferenceData | null>(loadStoredReference);
     const [allOrders, setAllOrders] = useState<Order[]>([]);
+    const [orderDates, setOrderDates] = useState<string[]>([]);
     const [plan, setPlan] = useState<PlanResponse | null>(null);
     const [planComparison, setPlanComparison] = useState<PlanComparison | null>(null);
-    const [eventHistory, setEventHistory] = useState<EventHistory | null>(null);
-    const [pendingReplayOverride, setPendingReplayOverride] = useState(false);
+    const [eventLog, setEventLog] = useState<EventLogEntry[]>([]);
     const [absentStaffInput, setAbsentStaffInput] = useState("");
     const [eventType, setEventType] = useState<EventType>("VISIT_DELAYED");
     const [eventOrderId, setEventOrderId] = useState("");
     const [eventStaffId, setEventStaffId] = useState("");
-    const [targetStaffId, setTargetStaffId] = useState("");
     const [delayMin, setDelayMin] = useState("15");
+    const [cancelReason, setCancelReason] = useState<CancelReason>("NOT_CONFIRMED");
+    const [transferTarget, setTransferTarget] = useState<TransferTarget>("STATION_EQUIPMENT");
+    const [unavailableReason, setUnavailableReason] = useState<UnavailableReason>("VEHICLE_BREAKDOWN");
+    const [unavailableUntil, setUnavailableUntil] = useState("");
     const [eventNow, setEventNow] = useState(today + "T09:00:00+05:00");
     const [newOrderJson, setNewOrderJson] = useState("");
     const [staffFilter, setStaffFilter] = useState("ALL");
@@ -275,8 +263,11 @@ export default function DispatcherWorkspacePage() {
     const [building, setBuilding] = useState(false);
     const [sending, setSending] = useState(false);
     const [refreshing, setRefreshing] = useState(false);
+    const [scenarioProgress, setScenarioProgress] = useState<string | null>(null);
+    const [health, setHealth] = useState<{ state: "checking" | "ok" | "down"; label?: string }>({ state: "checking" });
     const [error, setError] = useState<string | null>(null);
     const [notice, setNotice] = useState<string | null>(null);
+    const scenarioAbort = useRef(false);
 
     const locationById = useMemo(() => locationIndex(reference), [reference]);
     const filteredRoutes = useMemo(() => (plan?.routes ?? []).filter((route) =>
@@ -290,17 +281,76 @@ export default function DispatcherWorkspacePage() {
     })), [filteredRoutes, locationById]);
     const mapPoints = useMemo<[number, number][]>(() =>
         mapRoutes.flatMap(({ points }) => points.map((point) => [point.lat, point.lon] as [number, number])), [mapRoutes]);
-    const activeAlerts = (plan?.alerts ?? []).filter((alert: PlanAlert) =>
-        alert.status === "ACTIVE" && alert.type === "LATE_RISK");
-    const hasPendingReplay = Boolean(pendingReplayOverride || (plan && eventHistory &&
-        Date.parse(eventHistory.model_now) > Date.parse(plan.as_of)));
+    const lateRiskAlerts = (plan?.alerts ?? []).filter((alert: PlanAlert) => alert.type === "LATE_RISK");
+    const activeAlerts = lateRiskAlerts.filter((alert) => alert.status === "ACTIVE");
+    const resolvedAlerts = lateRiskAlerts.filter((alert) => alert.status !== "ACTIVE");
     const staffOptions = reference?.staff ?? (plan?.routes ?? []).map((route) => ({
         staff_id: route.staff_id,
         display_name: route.staff_id,
     }));
+    const planOrderIds = useMemo(() => (plan?.routes ?? []).flatMap((route) =>
+        route.stops.filter((stop) => stop.type === "VISIT" && stop.order_id).map((stop) => stop.order_id as string)), [plan]);
+    const busy = sending || building || uploading;
+
+    // Состояние сервиса: GET /api/v1/health.
+    useEffect(() => {
+        let alive = true;
+        const check = () => getHealth()
+            .then((info) => alive && setHealth({ state: "ok", label: [info.team, info.version].filter(Boolean).join(" · ") }))
+            .catch(() => alive && setHealth({ state: "down" }));
+        void check();
+        const timer = window.setInterval(() => void check(), 15_000);
+        return () => { alive = false; window.clearInterval(timer); };
+    }, []);
+
+    // Если сервис уже построил план на выбранную дату, показываем его (например, после перезагрузки страницы).
+    useEffect(() => {
+        let alive = true;
+        getPlan(date)
+            .then((latest) => {
+                if (!alive) return;
+                setPlan(latest);
+                setEventNow(latest.as_of);
+                setModelNow(latest.as_of);
+            })
+            .catch(() => { /* 404 — план ещё не построен */ });
+        return () => { alive = false; };
+    }, [date]);
 
     function fileHandler(setter: (file: File | null) => void) {
         return (event: ChangeEvent<HTMLInputElement>) => setter(event.target.files?.[0] ?? null);
+    }
+    function resetDayState() {
+        setPlan(null); setEventLog([]); setPlanComparison(null); setSelectedOrderId(null);
+    }
+    function changeDate(value: string) {
+        if (!value) return;
+        setDate(value);
+        setModelNow(value + modelNow.slice(10));
+        setEventNow(value + eventNow.slice(10));
+        resetDayState();
+    }
+    function applyPlan(next: PlanResponse) {
+        setPlan(next);
+        setEventNow(next.as_of);
+    }
+
+    async function handleOrdersFile(event: ChangeEvent<HTMLInputElement>) {
+        const file = event.target.files?.[0] ?? null;
+        setOrdersFile(file);
+        if (!file) return;
+        try {
+            const orders = unwrapArray<Order>(await readJson(file), "orders", file.name);
+            const dates = [...new Set(orders.map((order) => offsetDate(order.slot?.start ?? "")).filter(Boolean))].sort();
+            setAllOrders(orders);
+            setOrderDates(dates);
+            setError(null);
+            if (dates.length && !dates.includes(date)) changeDate(dates[0]);
+            setNotice("В файле " + orders.length + " нарядов за " + dates.length + " дн.: " + dates.join(", ") + ".");
+        } catch (cause) {
+            setOrderDates([]);
+            setError(describeApiError(cause));
+        }
     }
 
     async function handleUploadReference() {
@@ -324,43 +374,41 @@ export default function DispatcherWorkspacePage() {
             const nextMatrix = typeof matrixRaw === "object" && matrixRaw !== null && "travel_matrix" in matrixRaw
                 ? (matrixRaw as { travel_matrix: TravelMatrix }).travel_matrix : matrixRaw as TravelMatrix;
             await uploadReference(nextReference);
-            // The backend resets loaded day snapshots as soon as reference data is replaced.
+            // Загрузка справочников удаляет все дни, планы и события на сервере.
             setReference(nextReference);
-            setPlan(null); setEventHistory(null); setPlanComparison(null); setSelectedOrderId(null); setAllOrders([]);
-            setPendingReplayOverride(false);
+            storeReference(nextReference);
+            resetDayState();
             await uploadTravelMatrix(nextMatrix);
             setNotice("Справочники и матрица загружены: " + nextReference.staff.length + " сотрудников, " +
                 nextReference.service_centers.length + " СЦ, " + nextReference.access_nodes.length +
                 " узлов. Состояние дней сброшено — загрузи день заново.");
-        } catch (cause) { setError(getErrorMessage(cause)); }
+        } catch (cause) { setError(describeApiError(cause)); }
         finally { setUploading(false); }
     }
 
     async function handleBuildPlan() {
-        if (!ordersFile) { setError("Выбери orders_train.json или файл нарядов одного дня."); return; }
+        if (!allOrders.length) { setError("Выбери orders_train.json или файл нарядов одного дня."); return; }
         if (!reference) { setError("Сначала загрузи справочники и матрицу."); return; }
         setBuilding(true); setError(null); setNotice(null);
         try {
-            const raw = await readJson(ordersFile);
-            const orders = unwrapArray<Order>(raw, "orders", ordersFile.name);
-            const selectedOrders = selectDayOrders(orders, date, modelNow);
+            const selectedOrders = selectDayOrders(allOrders, date, modelNow);
+            if (!selectedOrders.length) {
+                throw new Error("В файле нет нарядов со слотом на " + date + " и registered_at не позже " + modelNow + ".");
+            }
             const dayInput: DayInput = {
                 date, now: modelNow, orders: selectedOrders,
                 absent_staff_ids: absentStaffInput.split(",").map((value) => value.trim()).filter(Boolean),
             };
             const previousPlan = plan?.date === date ? plan : null;
             await uploadDay(date, dayInput);
-            setPlan(null); setEventHistory(null); setPlanComparison(null); setSelectedOrderId(null);
-            setPendingReplayOverride(false);
-            await generatePlan(date);
-            const [latestPlan, history] = await Promise.all([getPlan(date), getEventHistory(date)]);
-            setAllOrders(orders); setPlan(latestPlan); setEventHistory(history); setEventNow(modelNow);
-            setPendingReplayOverride(false);
-            setPlanComparison(comparePlanVersions(previousPlan, latestPlan, "Перестроение исходного дня"));
-            setSelectedOrderId(null);
-            setNotice("План v" + latestPlan.plan_version + " построен. В день загружено " + selectedOrders.length + " нарядов.");
+            resetDayState();
+            const built = await generatePlan(date);
+            applyPlan(built);
+            setPlanComparison(comparePlanVersions(previousPlan, built, "Перестроение исходного дня"));
+            setNotice("План v" + built.plan_version + " построен за " + (built.computation_ms ?? 0) +
+                " мс. В день загружено " + selectedOrders.length + " нарядов.");
             setActivePanel("unassigned");
-        } catch (cause) { setError(getErrorMessage(cause)); }
+        } catch (cause) { setError(describeApiError(cause)); }
         finally { setBuilding(false); }
     }
 
@@ -368,214 +416,287 @@ export default function DispatcherWorkspacePage() {
         setRefreshing(true); setError(null);
         try {
             const previousPlan = plan?.date === date ? plan : null;
-            const [latestPlan, history] = await Promise.all([getPlan(date), getEventHistory(date)]);
-            const comparison = comparePlanVersions(previousPlan, latestPlan, "Обновление из API");
+            const latest = await getPlan(date);
+            const comparison = comparePlanVersions(previousPlan, latest, "Обновление из API");
             if (comparison) setPlanComparison(comparison);
-            setPlan(latestPlan); setEventHistory(history);
-            setModelNow(history.model_now); setEventNow(history.model_now);
-            setNotice("Получен план v" + latestPlan.plan_version + " на " + date + ".");
-        } catch (cause) { setError(getErrorMessage(cause)); }
+            applyPlan(latest);
+            setModelNow(latest.as_of);
+            setNotice("Получен план v" + latest.plan_version + " на " + date + ".");
+        } catch (cause) { setError(describeApiError(cause)); }
         finally { setRefreshing(false); }
     }
 
+    /** Одно событие: POST /events → GET /plan. Журнал и план обновляются сразу. */
+    async function runEvent(event: DispatchEvent, hints: { delayMin?: number } = {}) {
+        const started = performance.now();
+        try {
+            const outcome = await sendEvent(date, event, hints);
+            const elapsed = Math.round(performance.now() - started);
+            setEventLog((log) => [...log, { event, result: outcome.result, elapsed_ms: elapsed }]);
+            applyPlan(outcome.plan);
+            if (event.type === "NEW_ORDER") {
+                const added = event.order;
+                setAllOrders((current) => current.some((item) => item.order_id === added.order_id)
+                    ? current : [...current, added]);
+            }
+            return { ...outcome, elapsed };
+        } catch (cause) {
+            const message = describeApiError(cause);
+            setEventLog((log) => [...log, { event, result: null, elapsed_ms: Math.round(performance.now() - started), error: message }]);
+            throw new Error(message, { cause });
+        }
+    }
+
     function validateEventTimestamp(): boolean {
-        if (!plan) {
-            setError("Сначала построй план дня.");
+        if (!plan) { setError("Сначала построй план дня."); return false; }
+        if (!isIsoWithOffset(eventNow) || !eventNow.startsWith(date + "T")) {
+            setError("Время события должно относиться к " + date + " и содержать смещение, например +05:00.");
             return false;
         }
-        if (!eventNow.startsWith(date + "T") || !/[+-]\d{2}:\d{2}$/.test(eventNow) ||
-            !Number.isFinite(Date.parse(eventNow))) {
-            setError("Время события должно относиться к " + date + " и содержать корректный UTC offset.");
-            return false;
-        }
-        const minimumModelTime = Math.max(
-            Date.parse(plan.as_of),
-            Date.parse(eventHistory?.model_now ?? plan.as_of),
-        );
-        if (Date.parse(eventNow) < minimumModelTime) {
-            setError("Время события не может быть раньше текущего модельного времени: " +
-                (eventHistory?.model_now ?? plan.as_of) + ".");
+        if (Date.parse(eventNow) < Date.parse(plan.as_of)) {
+            setError("Время события не может быть раньше текущего модельного времени " + formatTime(plan.as_of) + ".");
             return false;
         }
         return true;
     }
 
-    function createDispatchEvent(
-        eventType: EventType,
-        fields: {
-            orderId?: string;
-            staffId?: string;
-            targetStaffId?: string;
-            payload?: Record<string, unknown>;
-        } = {},
-    ): EventRequest {
-        return {
-            event_id: "EVT-" + crypto.randomUUID(),
-            event_type: eventType,
-            occurred_at: eventNow,
-            ...(fields.orderId ? { order_id: fields.orderId } : {}),
-            ...(fields.staffId ? { staff_id: fields.staffId } : {}),
-            ...(fields.targetStaffId ? { target_staff_id: fields.targetStaffId } : {}),
-            payload: fields.payload ?? {},
-        };
-    }
-
-    async function submitDispatchEvent(event: EventRequest, actionLabel: string): Promise<boolean> {
-        if (hasPendingReplay) {
-            setError("Сначала примени ранее принятые события через «Повторить перепланирование».");
-            return false;
-        }
+    async function submitDispatchEvent(event: DispatchEvent, actionLabel: string, hints: { delayMin?: number } = {}): Promise<boolean> {
         const previousPlan = plan;
-        let recorded = false;
         setSending(true); setError(null); setNotice(null);
         try {
-            await appendEvent(date, event);
-            recorded = true;
-            await generatePlan(date);
-            const [latestPlan, history] = await Promise.all([getPlan(date), getEventHistory(date)]);
-            setPlan(latestPlan);
-            setEventHistory(history);
-            setModelNow(history.model_now);
-            setEventNow(history.model_now);
-            setPendingReplayOverride(false);
-            setPlanComparison(comparePlanVersions(previousPlan, latestPlan, actionLabel));
-            setNotice("Событие принято. План пересчитан до версии v" + latestPlan.plan_version + ".");
+            const outcome = await runEvent(event, hints);
+            setPlanComparison(comparePlanVersions(previousPlan, outcome.plan, actionLabel));
+            const parts = [outcome.result.duplicate
+                ? "Повтор события — состояние не изменилось."
+                : "Событие принято, план v" + outcome.plan.plan_version + "."];
+            if (outcome.result.new_alerts?.length) parts.push("Новых предупреждений: " + outcome.result.new_alerts.length + ".");
+            parts.push("Ответ за " + outcome.elapsed + " мс.");
+            if (outcome.usedLegacyReplan) parts.push("Сервис не перепланировал сам — выполнен POST /plan.");
+            if (outcome.elapsed > EVENT_LIMIT_MS) parts.push("⚠ Дольше лимита 10 с — по правилам оценки событие не обработано в срок.");
+            setNotice(parts.join(" "));
             return true;
         } catch (cause) {
-            if (recorded) {
-                setPendingReplayOverride(true);
-                try {
-                    const history = await getEventHistory(date);
-                    setEventHistory(history);
-                    setModelNow(history.model_now);
-                    setEventNow(history.model_now);
-                } catch {
-                    // Keep the last known event history; the dispatcher can refresh it manually.
-                }
-                setError("Событие уже записано в журнал, но план не удалось полностью обновить. " +
-                    "Используй «Повторить перепланирование» или «Обновить». Причина: " + getErrorMessage(cause));
-            } else {
-                setError(getErrorMessage(cause));
-            }
-            return recorded;
+            setError(cause instanceof Error ? cause.message : String(cause));
+            return false;
         } finally {
             setSending(false);
         }
     }
 
-    async function handleReplanPendingEvents() {
-        if (!plan || !hasPendingReplay) return;
-        const previousPlan = plan;
-        setSending(true); setError(null); setNotice(null);
-        try {
-            await generatePlan(date);
-            const [latestPlan, history] = await Promise.all([getPlan(date), getEventHistory(date)]);
-            setPlan(latestPlan);
-            setEventHistory(history);
-            setModelNow(history.model_now);
-            setEventNow(history.model_now);
-            setPendingReplayOverride(false);
-            setPlanComparison(comparePlanVersions(previousPlan, latestPlan, "Применение ожидающих событий"));
-            setNotice("Ожидающие события применены. Текущая версия плана: v" + latestPlan.plan_version + ".");
-        } catch (cause) {
-            setError("Не удалось применить ожидающие события: " + getErrorMessage(cause));
-        } finally {
-            setSending(false);
+    function startedVisit(orderId: string) {
+        if (!plan) return null;
+        const visit = findVisit(plan, orderId);
+        if (!visit) { setError("Наряд " + orderId + " не стоит ни в одном маршруте."); return null; }
+        if (Date.parse(visit.stop.start) > Date.parse(eventNow)) {
+            setError("Визит по " + orderId + " начнётся в " + formatTime(visit.stop.start) +
+                ", а время события " + formatTime(eventNow) + ". Задержка и передача принимаются только для начатого визита — сдвинь время.");
+            return null;
         }
+        return visit;
     }
 
-    async function handleTransferOrder(orderId: string, targetStaffId: string) {
+    async function handleTransferOrder(orderId: string, target: TransferTarget) {
         if (!validateEventTimestamp()) return;
-        await submitDispatchEvent(
-            createDispatchEvent("ORDER_TRANSFERRED", { orderId, targetStaffId }),
-            "Ручное переназначение " + orderId,
-        );
+        const visit = startedVisit(orderId);
+        if (!visit) return;
+        await submitDispatchEvent({
+            event_id: newEventId(date, eventLog.length), type: "ORDER_TRANSFERRED", timestamp: eventNow,
+            staff_id: visit.route.staff_id, order_id: orderId, actual_end: eventNow, transferred_to: target,
+        }, "Передача в профильное подразделение " + orderId);
     }
 
-    async function handleDelayOrder(orderId: string, delayMin: number) {
+    async function handleDelayOrder(orderId: string, delay: number) {
         if (!validateEventTimestamp()) return;
-        if (!Number.isInteger(delayMin) || delayMin <= 0) {
-            setError("Задержка должна быть положительным целым числом.");
-            return;
-        }
-        await submitDispatchEvent(
-            createDispatchEvent("VISIT_DELAYED", { orderId, payload: { delay_min: delayMin } }),
-            "Задержка визита " + orderId,
-        );
+        if (!Number.isInteger(delay) || delay <= 0) { setError("Задержка должна быть положительным целым числом минут."); return; }
+        const visit = startedVisit(orderId);
+        if (!visit) return;
+        await submitDispatchEvent({
+            event_id: newEventId(date, eventLog.length), type: "VISIT_DELAYED", timestamp: eventNow,
+            staff_id: visit.route.staff_id, order_id: orderId, expected_end: addMinutes(visit.stop.end, delay),
+        }, "Задержка визита " + orderId, { delayMin: delay });
     }
 
-    async function handleCancelOrder(orderId: string) {
+    async function handleCancelOrder(orderId: string, reason: CancelReason) {
         if (!validateEventTimestamp()) return;
-        await submitDispatchEvent(
-            createDispatchEvent("ORDER_CANCELLED", { orderId }),
-            "Отмена наряда " + orderId,
-        );
+        await submitDispatchEvent({
+            event_id: newEventId(date, eventLog.length), type: "ORDER_CANCELLED", timestamp: eventNow,
+            order_id: orderId, reason,
+        }, "Отмена наряда " + orderId);
     }
 
     async function handleStaffUnavailable(staffId: string) {
         if (!validateEventTimestamp()) return;
-        await submitDispatchEvent(
-            createDispatchEvent("STAFF_UNAVAILABLE", { staffId }),
-            "Сотрудник недоступен: " + staffId,
-        );
+        await submitDispatchEvent({
+            event_id: newEventId(date, eventLog.length), type: "STAFF_UNAVAILABLE", timestamp: eventNow,
+            staff_id: staffId, until: null, reason: "OTHER",
+        }, "Сотрудник недоступен: " + staffId);
+    }
+
+    async function handleTimeTick() {
+        if (!validateEventTimestamp()) return;
+        await submitDispatchEvent({
+            event_id: newEventId(date, eventLog.length), type: "TIME_TICK", timestamp: eventNow,
+        }, "Ход времени до " + formatTime(eventNow));
     }
 
     async function handleSendEvent() {
         if (!plan) { setError("Сначала построй план дня."); return; }
-        const needsOrder = ["NEW_ORDER", "ORDER_CANCELLED", "VISIT_DELAYED", "ORDER_TRANSFERRED"].includes(eventType);
-        if (needsOrder && !eventOrderId.trim()) { setError("Для выбранного события требуется order_id."); return; }
-        if (eventType === "STAFF_UNAVAILABLE" && !eventStaffId.trim()) { setError("Для STAFF_UNAVAILABLE требуется staff_id."); return; }
-        if (eventType === "ORDER_TRANSFERRED" && !targetStaffId.trim()) { setError("Для ORDER_TRANSFERRED требуется target_staff_id."); return; }
-        let payload: Record<string, unknown> = {};
-        if (eventType === "VISIT_DELAYED") {
-            const delay = Number(delayMin);
-            if (!Number.isInteger(delay) || delay <= 0) { setError("delay_min должен быть положительным целым числом."); return; }
-            payload = { delay_min: delay };
-        } else if (eventType === "NEW_ORDER") {
-            try {
-                const parsed = JSON.parse(newOrderJson) as Record<string, unknown>;
-                const order = "order" in parsed ? parsed.order : parsed;
-                if (!order || typeof order !== "object") throw new Error("Не найден объект order");
-                payload = { order };
-            } catch (cause) {
-                setError("Проверь JSON нового наряда: " + (cause instanceof Error ? cause.message : "ошибка формата")); return;
-            }
-        }
         if (!validateEventTimestamp()) return;
+        const id = newEventId(date, eventLog.length);
+        const orderId = eventOrderId.trim();
+        const staffId = eventStaffId.trim();
+        switch (eventType) {
+            case "NEW_ORDER": {
+                let order: Order;
+                try {
+                    const parsed = JSON.parse(newOrderJson) as Record<string, unknown>;
+                    const candidate = "order" in parsed ? parsed.order : parsed;
+                    if (!candidate || typeof candidate !== "object" ||
+                        typeof (candidate as Order).order_id !== "string") throw new Error("не найден объект order с order_id");
+                    order = candidate as Order;
+                } catch (cause) {
+                    setError("Проверь JSON нового наряда: " + (cause instanceof Error ? cause.message : "ошибка формата"));
+                    return;
+                }
+                await submitDispatchEvent({ event_id: id, type: "NEW_ORDER", timestamp: eventNow, order }, "Новый наряд " + order.order_id);
+                setSelectedOrderId(order.order_id);
+                return;
+            }
+            case "ORDER_CANCELLED":
+                if (!orderId) { setError("Укажи наряд."); return; }
+                await submitDispatchEvent({ event_id: id, type: "ORDER_CANCELLED", timestamp: eventNow, order_id: orderId, reason: cancelReason }, "Отмена наряда " + orderId);
+                return;
+            case "VISIT_DELAYED": {
+                const delay = Number(delayMin);
+                if (!orderId) { setError("Укажи наряд."); return; }
+                if (!Number.isInteger(delay) || delay <= 0) { setError("Задержка должна быть положительным целым числом минут."); return; }
+                const visit = startedVisit(orderId);
+                if (!visit) return;
+                await submitDispatchEvent({
+                    event_id: id, type: "VISIT_DELAYED", timestamp: eventNow, staff_id: visit.route.staff_id,
+                    order_id: orderId, expected_end: addMinutes(visit.stop.end, delay),
+                }, "Задержка визита " + orderId, { delayMin: delay });
+                return;
+            }
+            case "ORDER_TRANSFERRED": {
+                if (!orderId) { setError("Укажи наряд."); return; }
+                const visit = startedVisit(orderId);
+                if (!visit) return;
+                await submitDispatchEvent({
+                    event_id: id, type: "ORDER_TRANSFERRED", timestamp: eventNow, staff_id: visit.route.staff_id,
+                    order_id: orderId, actual_end: eventNow, transferred_to: transferTarget,
+                }, "Передача в профильное подразделение " + orderId);
+                return;
+            }
+            case "STAFF_UNAVAILABLE": {
+                if (!staffId) { setError("Выбери сотрудника."); return; }
+                let until: string | null = null;
+                if (unavailableUntil) {
+                    until = date + "T" + unavailableUntil + ":00" + offsetSuffix(eventNow);
+                    if (Date.parse(until) <= Date.parse(eventNow)) { setError("Конец недоступности должен быть позже времени события."); return; }
+                }
+                await submitDispatchEvent({
+                    event_id: id, type: "STAFF_UNAVAILABLE", timestamp: eventNow, staff_id: staffId, until, reason: unavailableReason,
+                }, "Сотрудник недоступен: " + staffId);
+                return;
+            }
+            case "TIME_TICK":
+                await handleTimeTick();
+                return;
+        }
+    }
 
-        const event = createDispatchEvent(eventType, {
-            ...(needsOrder ? { orderId: eventOrderId.trim() } : {}),
-            ...(eventType === "STAFF_UNAVAILABLE" ? { staffId: eventStaffId.trim() } : {}),
-            ...(eventType === "ORDER_TRANSFERRED" ? { targetStaffId: targetStaffId.trim() } : {}),
-            payload,
-        });
-        const recorded = await submitDispatchEvent(event, EVENT_LABELS[eventType]);
-        if (recorded && eventType === "NEW_ORDER" && typeof payload.order === "object" &&
-            payload.order !== null && "order_id" in payload.order &&
-            typeof payload.order.order_id === "string") {
-            const newOrder = payload.order as Order;
-            setAllOrders(current => current.some(item => item.order_id === newOrder.order_id)
-                ? current : [...current, newOrder]);
-            setSelectedOrderId(newOrder.order_id);
+    /**
+     * Прогон events_example.json так, как это делает оркестратор организаторов: события по возрастанию
+     * timestamp; перед каждым событием отправляются сработавшие триггеры (VISIT_DELAYED /
+     * ORDER_TRANSFERRED), которые разворачиваются по текущему плану.
+     */
+    async function handleRunScenario() {
+        if (!plan) { setError("Сначала построй план дня."); return; }
+        if (!scenarioFile) { setError("Выбери events_example.json."); return; }
+        scenarioAbort.current = false;
+        setSending(true); setError(null); setNotice(null);
+        const startPlan = plan;
+        let current = plan;
+        let sent = 0;
+        let skipped = 0;
+        try {
+            const scenario = validateScenario(await readJson(scenarioFile));
+            if (scenario.date !== date) {
+                throw new Error("Сценарий составлен на " + scenario.date + ", а открыт день " + date + ".");
+            }
+            const orders = new Map(allOrders.map((order) => [order.order_id, order]));
+            const workTypes = new Map((reference?.work_types ?? []).map((item) => [item.code, item]));
+            const pending: ScenarioTrigger[] = [...scenario.triggers];
+            const total = scenario.events.length + scenario.triggers.length;
+            const fire = async (event: DispatchEvent) => {
+                setScenarioProgress("Событие " + (sent + 1) + " из ≤" + total + " · " + EVENT_LABELS[event.type] + " · " + formatTime(event.timestamp));
+                const outcome = await runEvent(event);
+                current = outcome.plan;
+                sent += 1;
+                if (event.type === "NEW_ORDER") orders.set(event.order.order_id, event.order);
+                if (outcome.elapsed > EVENT_LIMIT_MS) throw new Error("Событие " + event.event_id + " обработано за " + outcome.elapsed + " мс — дольше лимита 10 с.");
+            };
+            const flushDue = async (limit: string | null) => {
+                while (!scenarioAbort.current) {
+                    let best: { trigger: ScenarioTrigger; at: string } | null = null;
+                    for (const trigger of pending) {
+                        const at = triggerFireTime(trigger, current);
+                        if (!at) continue;
+                        if (limit !== null && Date.parse(at) > Date.parse(limit)) continue;
+                        if (!best || Date.parse(at) < Date.parse(best.at)) best = { trigger, at };
+                    }
+                    if (!best) return;
+                    pending.splice(pending.indexOf(best.trigger), 1);
+                    const step = triggerToEvent(best.trigger, current, orders, workTypes, current.as_of, newEventId(date, sent + eventLog.length));
+                    if (step.event) await fire(step.event); else skipped += 1;
+                }
+            };
+            for (const event of scenario.events) {
+                await flushDue(event.timestamp);
+                if (scenarioAbort.current) break;
+                await fire(event);
+            }
+            if (!scenarioAbort.current) await flushDue(null);
+            skipped += pending.length;
+            setPlanComparison(comparePlanVersions(startPlan, current, "Сценарий событий"));
+            setNotice((scenarioAbort.current ? "Сценарий остановлен. " : "Сценарий выполнен. ") +
+                "Отправлено событий: " + sent + ", пропущено триггеров: " + skipped + ". Итоговый план v" + current.plan_version + ".");
+        } catch (cause) {
+            setPlanComparison(comparePlanVersions(startPlan, current, "Сценарий событий (прерван)"));
+            setError("Сценарий прерван после " + sent + " событий: " + describeApiError(cause));
+        } finally {
+            setScenarioProgress(null);
+            setSending(false);
         }
     }
 
     const totalOrders = plan?.summary?.orders_total ?? allOrders.filter((order) => offsetDate(order.slot.start) === date).length;
+    const nowMinute = plan ? minuteOfDay(plan.as_of) : null;
+    const timeBehind = Boolean(plan && isIsoWithOffset(eventNow) && Date.parse(eventNow) < Date.parse(plan.as_of));
 
     return (
         <div className="v1-workspace">
             <div className="v1-page-heading">
-                <div><div className="eyebrow">STAGE E3 · API V1</div><h1>Рабочее место диспетчера</h1>
-                    <p>Маршруты, объяснение назначений и оперативное управление нарядами и бригадами.</p></div>
+                <div><div className="eyebrow">API V1 · api_spec.yaml</div><h1>Рабочее место диспетчера</h1>
+                    <p>Маршруты, предупреждения о рисках и оперативное перепланирование по событиям смены.</p></div>
                 <div className="v1-heading-actions">
+                    <span className={"v1-health v1-health-" + health.state}
+                        title={health.state === "down" ? "GET /api/v1/health не отвечает" : health.label}>
+                        <i /> {health.state === "ok" ? "Сервис готов" + (health.label ? " · " + health.label : "")
+                            : health.state === "down" ? "Сервис недоступен" : "Проверка сервиса…"}
+                    </span>
                     <label className="v1-date-control"><CalendarDays size={16} />
-                        <input type="date" value={date} onChange={(event) => {
-                            const value = event.target.value; setDate(value);
-                            setModelNow(value + modelNow.slice(10)); setEventNow(value + eventNow.slice(10));
-                            setPlan(null); setEventHistory(null); setPlanComparison(null); setSelectedOrderId(null);
-                            setPendingReplayOverride(false);
-                        }} /></label>
-                    <button className="secondary-button" type="button" onClick={() => void handleRefresh()} disabled={refreshing}>
+                        {orderDates.length > 0 ? (
+                            <select value={orderDates.includes(date) ? date : ""} onChange={(event) => changeDate(event.target.value)}>
+                                {!orderDates.includes(date) && <option value="">{date}</option>}
+                                {orderDates.map((value) => <option key={value} value={value}>{value}</option>)}
+                            </select>
+                        ) : (
+                            <input type="date" value={date} onChange={(event) => changeDate(event.target.value)} />
+                        )}
+                    </label>
+                    <button className="secondary-button" type="button" onClick={() => void handleRefresh()} disabled={refreshing || busy}>
                         <RefreshCw size={15} className={refreshing ? "v1-spin" : ""} /> Обновить
                     </button>
                 </div>
@@ -583,61 +704,66 @@ export default function DispatcherWorkspacePage() {
 
             {error && <div className="error-banner" role="alert"><span>{error}</span><button type="button" onClick={() => setError(null)}>Закрыть</button></div>}
             {notice && <div className="v1-notice" role="status"><CheckCircle2 size={16} /><span>{notice}</span><button type="button" onClick={() => setNotice(null)}><XCircle size={15} /></button></div>}
-            {plan && hasPendingReplay && <div className="v1-pending-replay" role="alert">
-                <div><strong>Есть события, ещё не применённые к плану</strong>
-                    <span>Модельное время журнала: {formatDateTime(eventHistory?.model_now)} · версия плана рассчитана на {formatDateTime(plan.as_of)}.</span></div>
-                <button className="primary-button" type="button" disabled={sending} onClick={() => void handleReplanPendingEvents()}>
-                    <RefreshCw size={14} /> Повторить перепланирование
-                </button>
-            </div>}
 
             <details className="v1-setup-panel" open={!plan}>
-                <summary><span><Upload size={17} /> Загрузка исходных данных</span><small>JSON / CSV · API организатора v1</small></summary>
+                <summary><span><Upload size={17} /> Загрузка исходных данных</span><small>JSON / CSV · шаги 2–5 сценария оценки</small></summary>
                 <div className="v1-setup-grid">
                     <label className="v1-file-field">Сервисные центры<input type="file" accept=".json,application/json" onChange={fileHandler(setServiceCentersFile)} /><small>{serviceCentersFile?.name ?? "service_centers.json"}</small></label>
                     <label className="v1-file-field">Сотрудники<input type="file" accept=".json,application/json" onChange={fileHandler(setStaffFile)} /><small>{staffFile?.name ?? "staff.json"}</small></label>
                     <label className="v1-file-field">Узлы доступа<input type="file" accept=".json,application/json" onChange={fileHandler(setAccessNodesFile)} /><small>{accessNodesFile?.name ?? "access_nodes.json"}</small></label>
                     <label className="v1-file-field">Типы работ<input type="file" accept=".csv,text/csv" onChange={fileHandler(setWorkTypesFile)} /><small>{workTypesFile?.name ?? "work_types.csv"}</small></label>
                     <label className="v1-file-field">Матрица маршрутов<input type="file" accept=".json,application/json" onChange={fileHandler(setMatrixFile)} /><small>{matrixFile?.name ?? "travel_matrix.json"}</small></label>
-                    <button className="primary-button v1-upload-button" type="button" onClick={() => void handleUploadReference()} disabled={uploading}>
+                    <button className="primary-button v1-upload-button" type="button" onClick={() => void handleUploadReference()} disabled={busy}>
                         {uploading ? <RefreshCw size={16} className="v1-spin" /> : <Upload size={16} />}
                         {uploading ? "Загружаем..." : "Загрузить справочники и матрицу"}
                     </button>
                 </div>
                 <div className="v1-day-upload">
-                    <label className="v1-file-field v1-orders-file">Наряды дня / orders_train.json<input type="file" accept=".json,application/json" onChange={fileHandler(setOrdersFile)} /><small>{ordersFile?.name ?? "Выбрать JSON"}</small></label>
-                    <label className="v1-text-field">Модельное время now<input value={modelNow} onChange={(event) => setModelNow(event.target.value)} placeholder="2026-10-26T08:00:00+05:00" /></label>
-                    <label className="v1-text-field">Недоступные сотрудники<input value={absentStaffInput} onChange={(event) => setAbsentStaffInput(event.target.value)} placeholder="ST-004, ST-011" /></label>
-                    <button className="primary-button" type="button" onClick={() => void handleBuildPlan()} disabled={building || !reference}>
+                    <label className="v1-file-field v1-orders-file">Наряды дня / orders_train.json<input type="file" accept=".json,application/json" onChange={(event) => void handleOrdersFile(event)} /><small>{ordersFile?.name ?? "Выбрать JSON"}</small></label>
+                    <label className="v1-text-field">Модельное время now<input value={modelNow} onChange={(event) => setModelNow(event.target.value)} placeholder="2026-10-26T08:30:00+05:00" /></label>
+                    <label className="v1-text-field">Не выходят на смену<input value={absentStaffInput} onChange={(event) => setAbsentStaffInput(event.target.value)} placeholder="ST-004, ST-011" /></label>
+                    <button className="primary-button" type="button" onClick={() => void handleBuildPlan()} disabled={busy || !reference}>
                         {building ? <RefreshCw size={16} className="v1-spin" /> : <Play size={16} />}
-                        {building ? "Строим план..." : "Загрузить день и построить план"}
+                        {building ? "Строим план (до 5 мин)..." : "Загрузить день и построить план"}
                     </button>
                 </div>
-                <p className="v1-setup-note">Исходные файлы остаются в браузере. После обновления страницы справочники для карты нужно загрузить повторно; сохранённый план можно получить через «Обновить».</p>
+                <p className="v1-setup-note">
+                    {reference
+                        ? "Справочники для карты сохранены в браузере (" + reference.staff.length + " сотрудников, " + reference.service_centers.length + " СЦ). "
+                        : "Справочники ещё не загружены. "}
+                    Файлы читаются в браузере и отправляются напрямую в API; повторная загрузка справочников удаляет все дни, планы и события на сервере.
+                </p>
             </details>
 
             {plan ? <Fragment>
                 <div className="v1-kpi-grid">
                     <div className="v1-kpi"><span>Наряды в дне</span><strong>{totalOrders}</strong><small>Входной набор</small></div>
-                    <div className="v1-kpi"><span>Визиты в плане</span><strong>{plan.summary?.visits_planned ?? plan.routes.reduce((sum, route) => sum + route.stops.filter((stop) => stop.type === "VISIT").length, 0)}</strong><small>План v{plan.plan_version}</small></div>
+                    <div className="v1-kpi"><span>Визиты в плане</span><strong>{plan.summary?.visits_planned ?? planOrderIds.length}</strong><small>План v{plan.plan_version}</small></div>
                     <div className="v1-kpi"><span>Нераспределённые</span><strong className={plan.unassigned.length ? "danger" : ""}>{plan.unassigned.length}</strong><small>Требуют решения</small></div>
                     <div className="v1-kpi"><span>Риски опоздания</span><strong className={activeAlerts.length ? "warning" : ""}>{activeAlerts.length}</strong><small>Активные LATE_RISK</small></div>
-                    <div className="v1-kpi"><span>В пути</span><strong>{formatDuration(plan.summary?.travel_sec_total ?? 0)}</strong><small>Сумма по маршрутам</small></div>
+                    <div className="v1-kpi"><span>В пути</span><strong>{formatDuration(plan.summary?.travel_sec_total ?? plan.routes.reduce((sum, route) => sum + (route.totals?.travel_sec ?? 0), 0))}</strong><small>Сумма по маршрутам</small></div>
                 </div>
 
                 <div className="v1-toolbar">
-                    <div className="v1-plan-meta"><span className="v1-live-dot" /> План v{plan.plan_version} · на {formatDateTime(plan.as_of)} · расчёт {plan.computation_ms} мс</div>
+                    <div className="v1-plan-meta"><span className="v1-live-dot" /> План v{plan.plan_version} · модельное время {formatDateTime(plan.as_of)}{plan.computation_ms != null ? " · расчёт " + plan.computation_ms + " мс" : ""}</div>
+                    <div className="v1-time-control" title="Модельное время для следующего события. Чтобы сервис обновил прогнозы без события, нажми «Применить»">
+                        <Clock3 size={14} />
+                        <input type="time" value={isIsoWithOffset(eventNow) ? eventNow.slice(11, 16) : ""}
+                            onChange={(event) => event.target.value && setEventNow(date + "T" + event.target.value + ":00" + offsetSuffix(eventNow))} />
+                        {[15, 30, 60].map((step) => <button key={step} type="button" className="secondary-button"
+                            onClick={() => setEventNow(addMinutes(eventNow, step))}>+{step}</button>)}
+                        <button type="button" className="secondary-button" disabled={busy || timeBehind} onClick={() => void handleTimeTick()}>Применить</button>
+                    </div>
                     <label className="v1-filter"><Filter size={14} /><select value={staffFilter} onChange={(event) => setStaffFilter(event.target.value)}>
                         <option value="ALL">Все сотрудники</option>
                         {staffOptions.map((staff) =>
                             <option key={staff.staff_id} value={staff.staff_id}>{staff.display_name || staff.staff_id}</option>)}
                     </select></label>
                 </div>
+                {timeBehind && <div className="error-banner" role="alert"><span>Время события {formatTime(eventNow)} раньше модельного времени плана {formatTime(plan.as_of)} — сервис вернёт EVENT_OUT_OF_ORDER.</span>
+                    <button type="button" onClick={() => setEventNow(plan.as_of)}>Сбросить</button></div>}
 
-                {planComparison && <PlanComparisonPanel
-                    comparison={planComparison}
-                    onClose={() => setPlanComparison(null)}
-                />}
+                {planComparison && <PlanComparisonPanel comparison={planComparison} onClose={() => setPlanComparison(null)} />}
 
                 <div className="v1-main-grid">
                     <section className="v1-card v1-map-card">
@@ -660,11 +786,11 @@ export default function DispatcherWorkspacePage() {
                             })}
                         </MapContainer> : <div className="v1-map-empty"><MapPinned size={28} /><strong>Нет координат для отображения</strong><span>Загрузи справочники, чтобы связать location_id с адресами.</span></div>}
                         <div className="v1-map-legend">{mapRoutes.map(({ route }, index) => <span key={route.staff_id}><i style={{ background: ROUTE_COLORS[index % ROUTE_COLORS.length] }} />{route.staff_id}</span>)}</div>
-                        <p className="v1-map-footnote">Линии показывают порядок посещения. Геометрия дорожного маршрута в V1 PlanResponse пока не передаётся.</p>
+                        <p className="v1-map-footnote">Линии показывают порядок посещения по прямой; геометрия дорожного маршрута в ответе API (Plan) не передаётся.</p>
                     </section>
 
                     <section className="v1-card v1-gantt-card">
-                        <div className="v1-card-heading"><div><h2><Activity size={17} /> Загрузка смен</h2><p>Временная шкала остановок</p></div><span className="v1-card-count">{filteredRoutes.length} сотрудников</span></div>
+                        <div className="v1-card-heading"><div><h2><Activity size={17} /> Загрузка смен</h2><p>Временная шкала остановок · пунктир — модельное время</p></div><span className="v1-card-count">{filteredRoutes.length} сотрудников</span></div>
                         <div className="v1-gantt-scale"><div className="v1-gantt-label-spacer" /><div className="v1-gantt-ticks">
                             {[8, 10, 12, 14, 16, 18, 20, 22].map((hour) => <span key={hour} style={{ left: (((hour * 60 - TIME_START) / (TIME_END - TIME_START)) * 100) + "%" }}>{String(hour).padStart(2, "0")}:00</span>)}
                         </div></div>
@@ -673,11 +799,11 @@ export default function DispatcherWorkspacePage() {
                                 staff={reference?.staff.find((member) => member.staff_id === route.staff_id)}
                                 selectedOrderId={selectedOrderId} onSelectOrder={setSelectedOrderId}
                                 onMarkUnavailable={(staffId) => void handleStaffUnavailable(staffId)}
-                                busy={sending || hasPendingReplay}
+                                busy={busy} nowMinute={nowMinute}
                                 color={ROUTE_COLORS[index % ROUTE_COLORS.length]} />)}
                             {!filteredRoutes.length && <div className="v1-empty-inline">Нет маршрутов для выбранного фильтра.</div>}
                         </div>
-                        <div className="v1-gantt-legend"><span><i className="visit" /> Визит</span><span><i className="break" /> Перерыв</span><span><i className="depot" /> СЦ / RESTOCK</span></div>
+                        <div className="v1-gantt-legend"><span><i className="visit" /> Визит</span><span><i className="break" /> Перерыв</span><span><i className="depot" /> СЦ / RESTOCK</span><span><i className="unavailable" /> Недоступен</span></div>
                     </section>
                 </div>
 
@@ -686,11 +812,11 @@ export default function DispatcherWorkspacePage() {
                     order={allOrders.find(order => order.order_id === selectedOrderId) ?? null}
                     plan={plan}
                     reference={reference}
-                    modelNow={eventHistory?.model_now ?? plan.as_of}
-                    actionsDisabled={sending || hasPendingReplay}
-                    onTransferOrder={(targetStaffId) => void handleTransferOrder(selectedOrderId, targetStaffId)}
-                    onDelayOrder={(delayMin) => void handleDelayOrder(selectedOrderId, delayMin)}
-                    onCancelOrder={() => void handleCancelOrder(selectedOrderId)}
+                    modelNow={isIsoWithOffset(eventNow) ? eventNow : plan.as_of}
+                    actionsDisabled={busy}
+                    onTransferOrder={(target) => void handleTransferOrder(selectedOrderId, target)}
+                    onDelayOrder={(delay) => void handleDelayOrder(selectedOrderId, delay)}
+                    onCancelOrder={(reason) => void handleCancelOrder(selectedOrderId, reason)}
                     onClose={() => setSelectedOrderId(null)}
                 />}
 
@@ -700,7 +826,7 @@ export default function DispatcherWorkspacePage() {
                         <button type="button" className={activePanel === "unassigned" ? "active" : ""} onClick={() => setActivePanel("unassigned")}>Нераспределённые <b>{plan.unassigned.length}</b></button>
                         <button type="button" className={activePanel === "risk" ? "active" : ""} onClick={() => setActivePanel("risk")}>Риск опоздания <b>{activeAlerts.length}</b></button>
                         <button type="button" className={activePanel === "pgp" ? "active" : ""} onClick={() => setActivePanel("pgp")}>ПГП <b>{plan.pgp_groups.length}</b></button>
-                        <button type="button" className={activePanel === "events" ? "active" : ""} onClick={() => setActivePanel("events")}>События <b>{eventHistory?.events.length ?? 0}</b></button>
+                        <button type="button" className={activePanel === "events" ? "active" : ""} onClick={() => setActivePanel("events")}>События <b>{eventLog.length}</b></button>
                     </div>
 
                     {activePanel === "unassigned" && <div className="v1-issue-list">
@@ -708,7 +834,9 @@ export default function DispatcherWorkspacePage() {
                             className={"v1-issue-row" + (selectedOrderId === item.order_id ? " selected" : "")}
                             onClick={() => setSelectedOrderId(item.order_id)}>
                             <span className="v1-issue-icon"><AlertTriangle size={17} /></span>
-                            <span className="v1-issue-main"><strong>{item.order_id}</strong><small>{item.reason_text}</small></span>
+                            <span className="v1-issue-main"><strong>{item.order_id} · {REASON_LABELS[item.reason_code] ?? item.reason_code}</strong>
+                                <small>{item.reason_text} → {ACTION_LABELS[item.suggested_action] ?? item.suggested_action}
+                                    {item.proposed_slot ? " (слот " + formatDateTime(item.proposed_slot.start) + "–" + formatTime(item.proposed_slot.end) + ")" : ""}</small></span>
                             <span className="v1-issue-code">{item.reason_code}</span>
                         </button>)}
                         {!plan.unassigned.length && <div className="v1-empty-inline"><CheckCircle2 size={17} /> Все наряды распределены.</div>}
@@ -719,16 +847,26 @@ export default function DispatcherWorkspacePage() {
                             className={"v1-issue-row" + (selectedOrderId === alert.order_id ? " selected" : "")}
                             onClick={() => setSelectedOrderId(alert.order_id ?? null)}>
                             <span className="v1-issue-icon risk"><Clock3 size={17} /></span>
-                            <span className="v1-issue-main"><strong>{alert.order_id || alert.alert_id}</strong><small>{alert.message}</small></span>
+                            <span className="v1-issue-main"><strong>{alert.order_id || alert.alert_id}</strong>
+                                <small>{alert.message} · {ACTION_LABELS[alert.suggested_action] ?? alert.suggested_action}
+                                    {alert.suggested_staff_id ? " → " + alert.suggested_staff_id : ""}{alert.applied ? " · применено" : ""}
+                                    {alert.forecast_start ? " · прогноз начала " + formatTime(alert.forecast_start) : ""}</small></span>
                             <span className="v1-risk-value">+{alert.lateness_min ?? 0} мин</span>
                         </button>)}
-                        {!activeAlerts.length && <div className="v1-empty-inline"><CheckCircle2 size={17} /> Активных LATE_RISK нет.</div>}
+                        {resolvedAlerts.map((alert: PlanAlert) => <button key={alert.alert_id} type="button"
+                            className="v1-issue-row v1-issue-resolved" onClick={() => setSelectedOrderId(alert.order_id ?? null)}>
+                            <span className="v1-issue-icon"><CheckCircle2 size={17} /></span>
+                            <span className="v1-issue-main"><strong>{alert.order_id || alert.alert_id} · закрыто</strong>
+                                <small>{alert.message}{alert.applied ? " · предложение применено" : ""}</small></span>
+                            <span className="v1-issue-code">{formatTime(alert.created_at)}</span>
+                        </button>)}
+                        {!lateRiskAlerts.length && <div className="v1-empty-inline"><CheckCircle2 size={17} /> Предупреждений LATE_RISK нет.</div>}
                     </div>}
 
                     {activePanel === "pgp" && <div className="v1-issue-list">
                         {plan.pgp_groups.map((group) => <div key={group.group_id} className="v1-pgp-row">
                             <div className="v1-pgp-header"><strong>{group.group_id}</strong><span>{group.access_node_id}</span></div>
-                            <p>{group.comment || group.action}</p>
+                            <p>{group.comment || ACTION_LABELS[group.action] || group.action}</p>
                             <div className="v1-pgp-orders">{group.order_ids.map((id) => <button key={id} type="button"
                                 className={selectedOrderId === id ? "selected" : ""} onClick={() => setSelectedOrderId(id)}>{id}</button>)}</div>
                             <small>Обнаружено: {formatDateTime(group.detected_at)}</small>
@@ -737,38 +875,73 @@ export default function DispatcherWorkspacePage() {
                     </div>}
 
                     {activePanel === "events" && <div className="v1-issue-list">
-                        {(eventHistory?.events ?? []).slice().reverse().map((event) => <div className="v1-event-history-row" key={event.event_id}>
-                            <span className="v1-event-dot" /><div><strong>{EVENT_LABELS[event.event_type] || event.event_type}</strong>
-                                <small>{event.order_id || event.staff_id || event.event_id} · {formatDateTime(event.occurred_at)}</small></div>
-                            <code>{event.event_sequence}</code>
+                        {eventLog.slice().reverse().map((entry) => <div className="v1-event-history-row" key={entry.event.event_id}>
+                            <span className="v1-event-dot" style={entry.error ? { background: "#dc2626" } : undefined} />
+                            <div><strong>{EVENT_LABELS[entry.event.type] || entry.event.type}</strong>
+                                <small>{("order_id" in entry.event ? entry.event.order_id : "staff_id" in entry.event ? entry.event.staff_id : entry.event.event_id)} · {formatDateTime(entry.event.timestamp)} · {entry.elapsed_ms} мс{entry.elapsed_ms > EVENT_LIMIT_MS ? " (дольше 10 с!)" : ""}</small>
+                                {entry.error && <small className="v1-event-error">{entry.error}</small>}</div>
+                            <code>{entry.result ? "v" + entry.result.plan_version : "✕"}</code>
                         </div>)}
-                        {!eventHistory?.events.length && <div className="v1-empty-inline">События ещё не поступали.</div>}
+                        {!eventLog.length && <div className="v1-empty-inline">События из этого сеанса ещё не отправлялись (журнал хранится в браузере).</div>}
                     </div>}
                 </section>
 
                 <section className="v1-card v1-event-card">
                     <div className="v1-card-heading"><div><h2><Send size={17} /> Зарегистрировать событие</h2>
-                        <p>После приёма событие воспроизводится при пересчёте плана.</p></div><span className="v1-card-count">POST /events → POST /plan</span></div>
+                        <p>Сервис сам перепланирует невыполненную часть плана; интерфейс затем запрашивает актуальный план.</p></div><span className="v1-card-count">POST /events → GET /plan</span></div>
                     <div className="v1-event-form">
                         <label className="v1-text-field">Тип события<select value={eventType} onChange={(event) => setEventType(event.target.value as EventType)}>
                             {Object.entries(EVENT_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
                         </select></label>
-                        <label className="v1-text-field">Время события<input value={eventNow} onChange={(event) => setEventNow(event.target.value)} /></label>
-                        {["NEW_ORDER", "ORDER_CANCELLED", "VISIT_DELAYED", "ORDER_TRANSFERRED"].includes(eventType) &&
-                            <label className="v1-text-field">ID наряда<input value={eventOrderId} onChange={(event) => setEventOrderId(event.target.value)} placeholder="ORD-20261026-0001" /></label>}
-                        {eventType === "STAFF_UNAVAILABLE" && <label className="v1-text-field">ID сотрудника<input value={eventStaffId} onChange={(event) => setEventStaffId(event.target.value)} placeholder="ST-001" /></label>}
-                        {eventType === "ORDER_TRANSFERRED" && <label className="v1-text-field">Передать сотруднику<input value={targetStaffId} onChange={(event) => setTargetStaffId(event.target.value)} placeholder="ST-002" /></label>}
+                        <label className="v1-text-field">Время события (ISO-8601)<input value={eventNow} onChange={(event) => setEventNow(event.target.value)} /></label>
+                        {["ORDER_CANCELLED", "VISIT_DELAYED", "ORDER_TRANSFERRED"].includes(eventType) &&
+                            <label className="v1-text-field">Наряд<input list="v1-plan-orders" value={eventOrderId} onChange={(event) => setEventOrderId(event.target.value)} placeholder="ORD-20261026-0001" /></label>}
+                        {eventType === "STAFF_UNAVAILABLE" && <Fragment>
+                            <label className="v1-text-field">Сотрудник<select value={eventStaffId} onChange={(event) => setEventStaffId(event.target.value)}>
+                                <option value="">— выбери —</option>
+                                {staffOptions.map((staff) => <option key={staff.staff_id} value={staff.staff_id}>{staff.display_name || staff.staff_id} · {staff.staff_id}</option>)}
+                            </select></label>
+                            <label className="v1-text-field">Недоступен до (пусто — до конца смены)<input type="time" value={unavailableUntil} onChange={(event) => setUnavailableUntil(event.target.value)} /></label>
+                            <label className="v1-text-field">Причина<select value={unavailableReason} onChange={(event) => setUnavailableReason(event.target.value as UnavailableReason)}>
+                                <option value="VEHICLE_BREAKDOWN">Поломка автомобиля</option>
+                                <option value="ILLNESS">Болезнь</option>
+                                <option value="OTHER">Другое</option>
+                            </select></label>
+                        </Fragment>}
+                        {eventType === "ORDER_CANCELLED" && <label className="v1-text-field">Причина отмены<select value={cancelReason} onChange={(event) => setCancelReason(event.target.value as CancelReason)}>
+                            <option value="NOT_CONFIRMED">Абонент не подтвердил визит</option>
+                            <option value="CUSTOMER_REQUEST">Отказ абонента</option>
+                        </select></label>}
+                        {eventType === "ORDER_TRANSFERRED" && <label className="v1-text-field">Передано в<select value={transferTarget} onChange={(event) => setTransferTarget(event.target.value as TransferTarget)}>
+                            <option value="STATION_EQUIPMENT">Станционное оборудование</option>
+                            <option value="TRUNK_CABLE">Магистральный кабель</option>
+                        </select></label>}
                         {eventType === "VISIT_DELAYED" && <label className="v1-text-field">Задержка, мин<input type="number" min="1" value={delayMin} onChange={(event) => setDelayMin(event.target.value)} /></label>}
-                        {eventType === "NEW_ORDER" && <label className="v1-text-field v1-new-order-json">JSON нового наряда<textarea rows={5} value={newOrderJson} onChange={(event) => setNewOrderJson(event.target.value)} placeholder='{"order_id":"ORD-...","work_type_code":"REPAIR", ...}' /></label>}
-                        <button type="button" className="primary-button v1-event-submit" onClick={() => void handleSendEvent()} disabled={sending}>
-                            {sending ? <RefreshCw size={15} className="v1-spin" /> : <Send size={15} />}
-                            {sending ? "Пересчитываем..." : "Отправить и перепланировать"}
+                        {eventType === "NEW_ORDER" && <label className="v1-text-field v1-new-order-json">JSON нового наряда (Order или объект с полем order)<textarea rows={5} value={newOrderJson} onChange={(event) => setNewOrderJson(event.target.value)} placeholder='{"order_id":"ORD-...","work_type_code":"REPAIR", ...}' /></label>}
+                        <button type="button" className="primary-button v1-event-submit" onClick={() => void handleSendEvent()} disabled={busy}>
+                            {sending && !scenarioProgress ? <RefreshCw size={15} className="v1-spin" /> : <Send size={15} />}
+                            {sending && !scenarioProgress ? "Перепланируем..." : "Отправить событие"}
                         </button>
                     </div>
-                    <p className="v1-setup-note"><AlertTriangle size={14} /> Event API только записывает событие. UI отдельно вызывает генерацию плана, чтобы применить replay C1–C4 в текущей реализации backend.</p>
+                    <datalist id="v1-plan-orders">{planOrderIds.map((id) => <option key={id} value={id} />)}</datalist>
+                    <p className="v1-setup-note"><AlertTriangle size={14} /> Задержка и передача принимаются только для начатого визита (start ≤ времени события), отмена — только для ещё не начатого. Время события не может быть раньше модельного времени плана.</p>
+
+                    <div className="v1-scenario">
+                        <label className="v1-file-field">Сценарий событий<input type="file" accept=".json,application/json" onChange={fileHandler(setScenarioFile)} /><small>{scenarioFile?.name ?? "events_example.json"}</small></label>
+                        {scenarioProgress ? (
+                            <button type="button" className="danger-button" onClick={() => { scenarioAbort.current = true; }}>
+                                <Square size={14} /> Остановить · {scenarioProgress}
+                            </button>
+                        ) : (
+                            <button type="button" className="secondary-button" disabled={busy || !scenarioFile} onClick={() => void handleRunScenario()}>
+                                <ListVideo size={15} /> Прогнать сценарий
+                            </button>
+                        )}
+                        <small>Как оркестратор: события по возрастанию времени, триггеры (задержка/передача) разворачиваются по текущему плану.</small>
+                    </div>
                 </section>
             </Fragment> : <div className="v1-empty-workspace"><Route size={32} /><h2>План дня ещё не загружен</h2>
-                <p>Загрузи справочники, матрицу и наряды, затем построй план. Здесь появятся карта, график смен и контрольные списки.</p></div>}
+                <p>Загрузи справочники и матрицу, выбери файл нарядов и нажми «Загрузить день и построить план». Здесь появятся карта, график смен и контрольные списки.</p></div>}
         </div>
     );
 }

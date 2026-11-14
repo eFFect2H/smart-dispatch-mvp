@@ -2897,3 +2897,43 @@ a {
   background: #fff;
   color: #788397;
 }
+
+/* ---- API v1: статус сервиса, время, сценарий событий ---- */
+.v1-health {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 6px 10px; border-radius: 999px; font-size: 11px; font-weight: 600;
+  background: #f1f5f9; color: #475569; white-space: nowrap;
+}
+.v1-health i { width: 8px; height: 8px; border-radius: 50%; background: #94a3b8; }
+.v1-health-ok { background: #ecfdf5; color: #047857; }
+.v1-health-ok i { background: #10b981; }
+.v1-health-down { background: #fef2f2; color: #b91c1c; }
+.v1-health-down i { background: #ef4444; }
+
+.v1-time-control {
+  display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  padding: 4px 8px; border: 1px solid #e2e8f0; border-radius: 10px; background: #fff;
+}
+.v1-time-control input[type="time"] { border: 1px solid #e2e8f0; border-radius: 6px; padding: 3px 6px; font: inherit; font-size: 12px; }
+.v1-time-control .secondary-button { padding: 3px 8px; font-size: 11px; }
+.v1-date-control select { border: 0; background: transparent; font: inherit; }
+
+.v1-gantt-now {
+  position: absolute; top: 0; bottom: 0; width: 0;
+  border-left: 2px dashed #ef4444; pointer-events: none; z-index: 3;
+}
+.v1-gantt-unavailable {
+  position: absolute; top: 2px; bottom: 2px; border-radius: 4px; z-index: 1;
+  background: repeating-linear-gradient(45deg, rgba(239,68,68,.28), rgba(239,68,68,.28) 4px, rgba(239,68,68,.1) 4px, rgba(239,68,68,.1) 8px);
+}
+.v1-gantt-legend .unavailable {
+  background: repeating-linear-gradient(45deg, rgba(239,68,68,.5), rgba(239,68,68,.5) 3px, rgba(239,68,68,.2) 3px, rgba(239,68,68,.2) 6px);
+}
+.v1-issue-resolved { opacity: .6; }
+.v1-event-error { color: #b91c1c; display: block; }
+.v1-scenario {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  margin-top: 14px; padding-top: 14px; border-top: 1px dashed #e2e8f0;
+}
+.v1-scenario .v1-file-field { min-width: 220px; }
+.v1-scenario > small { color: #64748b; flex: 1 1 240px; }
