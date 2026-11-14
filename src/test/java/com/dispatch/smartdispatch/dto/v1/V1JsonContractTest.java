@@ -1,12 +1,12 @@
 package com.dispatch.smartdispatch.dto.v1;
 
-import com.dispatch.smartdispatch.dto.v1.V1Dtos.EquipmentDto;
+import com.dispatch.smartdispatch.dto.v1.EventDtos.EventRequest;\nimport com.dispatch.smartdispatch.dto.v1.EventDtos.EventType;\nimport com.dispatch.smartdispatch.dto.v1.V1Dtos.EquipmentDto;
 import com.dispatch.smartdispatch.dto.v1.V1Dtos.OrderDto;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
-import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.BeforeEach;\n\nimport java.time.OffsetDateTime;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.*;

@@ -144,6 +144,25 @@ class DispatchEventReplayServiceTest {
         assertTrue(replay.transferTargets().isEmpty());
     }
 
+
+    @Test
+    void timeTickDoesNotChangePlanningInputDuringEventReplay() {
+        List<DispatchEventEntity> events = List.of(
+                event("EVT-TICK", EventType.TIME_TICK, NOW.plusMinutes(15),
+                        null, null, null, mapper.createObjectNode())
+        );
+        when(eventRepository.findAllByDayDateOrderByEventSequenceAsc(DATE)).thenReturn(events);
+
+        DispatchEventReplayService.ReplayResult replay =
+                replayService.replay(DATE, baseDay, Set.of());
+
+        assertEquals(baseDay, replay.effectiveDayPayload(),
+                "TIME_TICK advances the model clock but must not mutate planning input");
+        assertTrue(replay.cancelledOrderIds().isEmpty());
+        assertTrue(replay.cancelledOrders().isEmpty());
+        assertTrue(replay.transferTargets().isEmpty());
+    }
+
     private DispatchEventEntity event(String eventId, EventType type, OffsetDateTime occurredAt,
                                       String orderId, String staffId, String targetStaffId,
                                       JsonNode payload) {
