@@ -1,5 +1,7 @@
 package com.dispatch.smartdispatch.dto.v1;
 
+import com.dispatch.smartdispatch.dto.v1.EventDtos.EventRequest;
+import com.dispatch.smartdispatch.dto.v1.EventDtos.EventType;
 import com.dispatch.smartdispatch.dto.v1.V1Dtos.EquipmentDto;
 import com.dispatch.smartdispatch.dto.v1.V1Dtos.OrderDto;
 import com.fasterxml.jackson.databind.DeserializationFeature;
@@ -8,6 +10,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+
+import java.time.OffsetDateTime;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -19,6 +23,24 @@ class V1JsonContractTest {
         objectMapper = new ObjectMapper()
                 .registerModule(new JavaTimeModule())
                 .disable(DeserializationFeature.ADJUST_DATES_TO_CONTEXT_TIME_ZONE);
+    }
+
+    @Test
+    void eventRequestDeserializesTimeTickAndOffsetTimestamp() throws Exception {
+        EventRequest request = objectMapper.readValue("""
+                {
+                  "event_id": "EVT-TICK-JSON",
+                  "event_type": "TIME_TICK",
+                  "occurred_at": "2026-10-26T08:15:00+05:00"
+                }
+                """, EventRequest.class);
+
+        assertEquals("EVT-TICK-JSON", request.eventId());
+        assertEquals(EventType.TIME_TICK, request.eventType());
+        assertEquals(OffsetDateTime.parse("2026-10-26T08:15:00+05:00"), request.occurredAt());
+        assertNull(request.orderId());
+        assertNull(request.staffId());
+        assertNull(request.targetStaffId());
     }
 
     @Test

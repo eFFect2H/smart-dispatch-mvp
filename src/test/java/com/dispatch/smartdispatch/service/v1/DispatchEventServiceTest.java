@@ -212,4 +212,67 @@ class DispatchEventServiceTest {
         assertEquals(occurredAt, response.modelNow());
         verify(eventRepository).save(any(DispatchEventEntity.class));
     }
+
+    @Test
+    void acceptsTimeTickAndAdvancesModelTimeWithoutOrderOrStaffReferences() {
+        OffsetDateTime occurredAt = NOW.plusMinutes(30);
+        EventRequest request = new EventRequest(
+                "EVT-TICK-001", EventType.TIME_TICK, occurredAt,
+                null, null, null, mapper.createObjectNode());
+
+        var response = service.append(DATE, request);
+
+        assertEquals("RECORDED_PENDING_REPLAN", response.status());
+        assertFalse(response.duplicate());
+        assertEquals(occurredAt, response.modelNow());
+        assertEquals(occurredAt, day.getModelNow());
+
+        org.mockito.ArgumentCaptor<DispatchEventEntity> saved =
+                org.mockito.ArgumentCaptor.forClass(DispatchEventEntity.class);
+        verify(eventRepository).save(saved.capture());
+        assertEquals(EventType.TIME_TICK, saved.getValue().getEventType());
+        assertEquals(occurredAt, saved.getValue().getOccurredAt());
+        assertNull(saved.getValue().getOrderId());
+        assertNull(saved.getValue().getStaffId());
+        assertNull(saved.getValue().getTargetStaffId());
+        verify(dayRepository).save(day);
+    }
+
+    @Test
+    void acceptsIdempotentTimeTickRetryWithoutAdvancingModelTimeAgain() {
+        OffsetDateTime occurredAt = NOW.plusMinutes(10);
+        DispatchEventEntity existing = new DispatchEventEntity(
+                DATE, "EVT-TICK-RETRY", EventType.TIME_TICK, occurredAt,
+                null, null, null, mapper.createObjectNode());
+        day.advanceModelNow(NOW.plusMinutes(20));
+        when(eventRepository.findByDayDateAndEventId(DATE, "EVT-TICK-RETRY"))
+                .thenReturn(Optional.of(existing));
+
+        EventRequest retry = new EventRequest(
+                "EVT-TICK-RETRY", EventType.TIME_TICK, occurredAt,
+                null, null, null, mapper.createObjectNode());
+
+        var response = service.append(DATE, retry);
+
+        assertTrue(response.duplicate());
+        assertEquals("ALREADY_RECORDED", response.status());
+        assertEquals(NOW.plusMinutes(20), response.modelNow());
+        verify(eventRepository, never()).save(any(DispatchEventEntity.class));
+        verify(dayRepository, never()).save(any(DispatchDaySnapshotEntity.class));
+    }
+
+    @Test
+    void rejectsTimeTickEarlierThanCurrentModelTime() {
+        day.advanceModelNow(NOW.plusMinutes(20));
+        EventRequest request = new EventRequest(
+                "EVT-TICK-OLD", EventType.TIME_TICK, NOW.plusMinutes(10),
+                null, null, null, mapper.createObjectNode());
+
+        V1ApiException exception = assertThrows(
+                V1ApiException.class, () -> service.append(DATE, request));
+
+        assertEquals("EVENT_TIME_REGRESSION", exception.getCode());
+        verify(eventRepository, never()).save(any(DispatchEventEntity.class));
+        verify(dayRepository, never()).save(any(DispatchDaySnapshotEntity.class));
+    }
 }

@@ -89,6 +89,10 @@ public class DispatchEventReplayService {
                         transferTargets.put(orderId, event.getTargetStaffId());
                     }
                 }
+
+                case TIME_TICK -> {
+                    // TIME_TICK advances modelNow when appended; it does not alter planning input.
+                }
             }
         }
 
