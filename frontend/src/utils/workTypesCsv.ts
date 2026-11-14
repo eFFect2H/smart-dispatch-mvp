@@ -1,6 +1,5 @@
 import type { Profile, WorkType } from "../types/v1";
 
-/** RFC 4180: запятая-разделитель, кавычки, экранирование `""`, CRLF/LF. */
 export function parseCsv(text: string): string[][] {
     const rows: string[][] = [];
     let row: string[] = [];
@@ -34,7 +33,6 @@ const REQUIRED = ["code", "name", "profiles", "duration_min", "max_start_delay_m
 const PROFILES: Profile[] = ["INSTALL", "LTP3"];
 const DEADLINE_KINDS = ["SLOT", "HOURS", "WORKING_DAYS"];
 
-/** Пустая ячейка и строка `null` (регистр не важен) — это null. */
 function isNull(value: string): boolean {
     return value === "" || value.toLowerCase() === "null";
 }

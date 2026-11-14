@@ -438,11 +438,6 @@ public class DispatchPlanService {
         ));
     }
 
-    /**
-     * Freezes a route prefix once its preceding stop has ended before model_now.
-     * This includes the next stop whose travel leg has already departed, even if its
-     * planned arrival is still in the future.
-     */
     private Map<String, FrozenRoute> detectFrozenRoutes(JsonNode previousPlanPayload,
                                                         OffsetDateTime modelNow) {
         if (previousPlanPayload == null || previousPlanPayload.isNull()) {
@@ -603,10 +598,11 @@ public class DispatchPlanService {
     }
 
     /**
-     * Selects disjoint PGP groups while keeping every group's registration-time span
-     * within the inclusive 60-minute window. The dynamic program maximizes the number
-     * of orders assigned to PGP groups, then prefers fewer groups and a deterministic
-     * earlier/larger first group when multiple partitions cover the same number of orders.
+     * Выбираются непересекающиеся группы PGP, при этом временной интервал регистрации для каждой группы
+     * должен укладываться в 60-минутный диапазон (включая границы). Динамический алгоритм максимизирует количество
+     * заказов, распределенных по группам PGP; если же несколько вариантов разбиения охватывают одинаковое число заказов,
+     * предпочтение отдается варианту с меньшим количеством групп, а также — на основе детерминированного правила —
+     * варианту, в котором первая группа начинается раньше или включает в себя больше заказов.
      */
     private List<GroupWindow> selectPgpWindows(List<JsonNode> candidates) {
         int size = candidates.size();

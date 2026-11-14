@@ -1,6 +1,3 @@
--- Stage EKB: replace the one-off Berlin demo with a persistent Yekaterinburg dataset.
--- Imported reference/day snapshots from the previous demo are cleared because they
--- are tied to a different city and cannot safely share this singleton V1 dataset.
 CREATE TABLE v1_demo_dataset (
     dataset_id SMALLINT PRIMARY KEY CHECK (dataset_id = 1),
     city_name VARCHAR(120) NOT NULL,

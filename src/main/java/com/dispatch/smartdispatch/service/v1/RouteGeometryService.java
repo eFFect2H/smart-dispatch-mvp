@@ -35,9 +35,9 @@ public class RouteGeometryService {
     }
 
     /**
-     * Builds display-only road geometry for the ordered stops in the persisted plan.
-     * The optimizer continues to use the saved duration/distance matrix; this endpoint
-     * calls OSRM Route only to obtain a road-following line for the map.
+     * Формирует дорожную геометрию (только для отображения) для упорядоченных точек маршрута из сохраненного плана.
+     * Оптимизатор продолжает использовать сохраненную матрицу длительности/расстояний; данный эндпоинт
+     * обращается к OSRM Route для получения линии маршрута, проложенной по дорогам, — для целей отображения на карте.
      */
     @Transactional(readOnly = true)
     public RouteGeometryResponse getRouteGeometries(LocalDate date) {

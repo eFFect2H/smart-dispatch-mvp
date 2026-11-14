@@ -33,7 +33,6 @@ export async function getHealth(): Promise<HealthResponse> {
     return response.data as HealthResponse;
 }
 
-/** `POST /plan` — первоначальный план (plan_version = 1). До 300 с. */
 export async function generatePlan(date: string, timeLimitSec = 300): Promise<PlanResponse> {
     const response = await api.post(
         `/api/v1/days/${date}/plan`,
@@ -55,7 +54,6 @@ export async function getPlan(date: string): Promise<PlanResponse> {
     return response.data as PlanResponse;
 }
 
-/** Ответ POST /events приводится к EventResult; старый backend отдаёт status/model_now. */
 function normalizeEventResult(raw: unknown, event: DispatchEvent): EventResult {
     const data = (raw ?? {}) as Partial<EventResult> & { status?: string; model_now?: string };
     return {
@@ -85,18 +83,9 @@ export async function postEvent(
 export interface EventOutcome {
     result: EventResult;
     plan: PlanResponse;
-    /** true, если пришлось вызвать POST /plan, потому что сервис не перепланировал сам. */
     usedLegacyReplan: boolean;
 }
 
-/**
- * Сценарий шага 6 из api_spec.yaml: `POST /events`, затем `GET /plan`.
- *
- * Спецификация: событие само перепланирует, а `POST /plan` после первого события
- * возвращает 409. Backend прежней версии только записывает событие и ждёт `POST /plan`.
- * Если актуальный план не отражает событие (`based_on_event_id` не совпал), один раз
- * вызывается `POST /plan`; ответ 409 при этом не считается ошибкой.
- */
 export async function sendEvent(
     date: string,
     event: DispatchEvent,
@@ -121,7 +110,6 @@ export async function sendEvent(
     };
 }
 
-/** Текст ошибки из ErrorResponse (`error.code/message/details`) либо сетевой ошибки. */
 export function describeApiError(error: unknown): string {
     if (axios.isAxiosError(error)) {
         if (error.code === "ECONNABORTED") {

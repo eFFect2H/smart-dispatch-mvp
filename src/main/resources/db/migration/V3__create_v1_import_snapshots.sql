@@ -1,9 +1,3 @@
--- Stage A: storage for the organizer-facing API v1.
--- The legacy MVP tables (teams, transport_requests) remain unchanged.
--- Reference data and the travel matrix are stored as versioned JSONB snapshots:
--- the matrix contains N x N durations and distances and should not be expanded
--- into millions of relational rows.
-
 CREATE TABLE v1_reference_snapshot (
     snapshot_id SMALLINT PRIMARY KEY CHECK (snapshot_id = 1),
     payload JSONB NOT NULL,

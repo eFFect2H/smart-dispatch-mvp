@@ -39,8 +39,6 @@ public class ReferenceDataService {
         validator.validate(request);
         JsonNode payload = toJson(request);
 
-        // The matrix may be uploaded before the first reference snapshot.
-        // In that order, verify its point identifiers as soon as the reference arrives.
         boolean firstReferenceUpload = !referenceRepository.existsById((short) 1);
         if (firstReferenceUpload) {
             matrixRepository.findById((short) 1).ifPresent(matrix ->
