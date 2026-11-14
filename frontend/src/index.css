@@ -2139,11 +2139,11 @@ a {
   height: 8px;
   border-radius: 50%;
 }
-.v1-map-footnote {
-  margin: 10px 0 0;
+.v1-map-attribution {
+  margin-top: 6px;
   color: #9ba4b2;
   font-size: 9px;
-  line-height: 1.45;
+  text-align: right;
 }
 .v1-gantt-scale,
 .v1-gantt-row {

@@ -3,6 +3,22 @@ import type { CancelReason, Order, PlanResponse, ReferenceData, TransferTarget }
 import DispatchActionPanel from "./DispatchActionPanel";
 import type { VisitPhase } from "./DispatchActionPanel";
 
+const REASON_LABELS: Record<string, string> = {
+    NO_QUALIFIED_STAFF: "Нет сотрудника с нужным допуском",
+    NO_SHIFT_TIME: "Не хватает времени смены",
+    SLOT_UNREACHABLE: "Не успевают в выбранное время",
+    NO_EQUIPMENT: "Нет нужного оборудования",
+    STAFF_UNAVAILABLE: "Исполнитель выбыл",
+    OTHER: "Другая причина",
+};
+const ACTION_LABELS: Record<string, string> = {
+    RESCHEDULE: "Перенести визит",
+    REASSIGN: "Передать другому сотруднику",
+    ESCALATE: "Решение диспетчера",
+    TRANSFER_TO_STATION: "Передать в сервисный центр",
+    NONE: "—",
+};
+
 interface SelectedOrderDetailsProps {
     orderId: string;
     order: Order | null;
@@ -99,7 +115,7 @@ export default function SelectedOrderDetails({
 
     const state = assignedRoute && visit ? "Назначен" :
         unassigned ? "Не распределён" :
-        pgpGroup ? "В группе ПГП" :
+        pgpGroup ? "В групповой заявке" :
         cancelled ? "Отменён" : "Состояние не определено";
     const orderState = assignedRoute && visit ? "assigned" :
         unassigned ? "unassigned" : pgpGroup ? "pgp" : null;
@@ -130,7 +146,7 @@ export default function SelectedOrderDetails({
 
             {!order && (
                 <div className="v1-order-missing">
-                    Данные наряда не найдены среди загруженных заказов. Состояние ниже взято из сохранённого плана.
+                    Заявка отсутствует в исходных данных. Ниже показано её состояние в плане.
                 </div>
             )}
 
@@ -233,17 +249,17 @@ export default function SelectedOrderDetails({
 
             {unassigned && (
                 <div className="v1-order-state-detail warning">
-                    <strong>{unassigned.reason_code}</strong>
+                    <strong>{REASON_LABELS[unassigned.reason_code] ?? "Требует решения"}</strong>
                     <p>{unassigned.reason_text}</p>
-                    <small>Рекомендуемое действие: {unassigned.suggested_action}</small>
+                    <small>Рекомендуемое действие: {ACTION_LABELS[unassigned.suggested_action] ?? "Проверить вручную"}</small>
                     {activeAlert && <small>{activeAlert.message}</small>}
                 </div>
             )}
             {pgpGroup && (
                 <div className="v1-order-state-detail info">
                     <strong>Группа {pgpGroup.group_id} · {pgpGroup.access_node_id}</strong>
-                    <p>{pgpGroup.comment || pgpGroup.action}</p>
-                    <small>В группе {pgpGroup.order_ids.length} нарядов · {pgpGroup.action}</small>
+                    <p>{pgpGroup.comment || ACTION_LABELS[pgpGroup.action] || "Групповая заявка"}</p>
+                    <small>В группе {pgpGroup.order_ids.length} нарядов</small>
                 </div>
             )}
             {cancelled && (
