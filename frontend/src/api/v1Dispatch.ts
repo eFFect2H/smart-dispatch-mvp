@@ -4,14 +4,28 @@ import { toWireEvent } from "../utils/events";
 import type {
     ApiError,
     ApiLoadResult,
-    DayInput,
     DispatchEvent,
     EventResult,
     HealthResponse,
+    DemoInfoResponse,
+    DemoDayResponse,
     PlanResponse,
-    ReferenceData,
-    TravelMatrix,
 } from "../types/v1";
+
+export async function getDemoInfo(): Promise<DemoInfoResponse> {
+    const response = await api.get("/api/v1/demo");
+    return response.data as DemoInfoResponse;
+}
+
+export async function getReference(): Promise<ReferenceData> {
+    const response = await api.get("/api/v1/reference");
+    return response.data as ReferenceData;
+}
+
+export async function initializeDemoDay(date: string): Promise<DemoDayResponse> {
+    const response = await api.post(`/api/v1/demo/days/${date}/initialize`);
+    return response.data as DemoDayResponse;
+}
 
 export async function getHealth(): Promise<HealthResponse> {
     const response = await api.get("/api/v1/health", { timeout: TIMEOUTS_MS.health });
